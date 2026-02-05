@@ -86,4 +86,3 @@ ss = s; [v q] = StoDLP(s,ss,mu);                % check matches direct sum
 ss.x = s.x+2; [v2 q2] = StoDLP(s,ss,mu);
 v = v + 3*v2; q = q + 3*q2;
 norm(u-v)
-
