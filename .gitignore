@@ -1,3 +1,5 @@
 ExpectedMatrices/*
 *.asv
 *.mat
+*/jax-venv/*
+**/__pycache__/*
