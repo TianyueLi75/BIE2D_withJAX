@@ -47,16 +47,16 @@ if nargin<5, side = 'i'; end     % interior or exterior
 if nargin<6, meth = 'h'; end
 % wrap the below routines...
 if meth=='h'
-  varargout{1:nargout} = LapDLP_closepanel_HO(t,s,a,b,side);
+  [varargout{1:nargout}] = LapDLP_closepanel_HO(t,s,a,b,side);
 elseif meth=='s'
-  varargout{1:nargout} = LapDLP_closepanel_SS(t,s,a,b,side);
+  [varargout{1:nargout}] = LapDLP_closepanel_SS(t,s,a,b,side);
 end
 %%%%%%%%%
   
 function varargout = LapDLP_closepanel_HO(t,s,a,b,side)    % Re wrapper
 % true DLP, taking real part.
-varargout{1:nargout} = LapDLPcmplx_closepanel_HO(t,s,a,b,side);
-for i=1:nargout,
+[varargout{1:nargout}] = LapDLPcmplx_closepanel_HO(t,s,a,b,side);
+for i=1:nargout
   varargout{i} = real(varargout{i});
 end
 

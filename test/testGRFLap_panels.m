@@ -9,6 +9,12 @@ p = 12;                       % panel order
 [pa tpan s] = quadr_uniform_panels(s,Np,p);
 zpan = s.Z(tpan);             % panel endpoint locations, in C plane
 
+for i=1:numel(pa)
+    pa{i}.nx = -pa{i}.nx;
+    pa{i}.xp = -pa{i}.xp;
+    pa{i}.wxp = -pa{i}.wxp;
+end
+
 clear t; t.x = 0.5+0.2i;      % targ: far inside pt (so plain quadr good)
 t.nx = exp(1i*pi*1.9);        % arb targ normal
 
@@ -48,7 +54,7 @@ fprintf('GRF far int pt (val,dderiv) err = (%.3g,%.3g)\n',abs(err),abs(errn))
 s0 = 0.3; dist = 1e-3; t.x = s.Z(s0) - dist*(-1i*s.Zp(s0)/abs(s.Zp(s0)));
 if verb, plot(t.x,'r*'); drawnow; end
 
-side = 'i'; closepan = 1.2;    % factor for when to use close
+side = 'e'; closepan = 1.2;    % factor for when to use close
 
 for meth = 'hs'          %  test Helsing-Ojala then singularity-swap
   vt = 0;      % pot at targ

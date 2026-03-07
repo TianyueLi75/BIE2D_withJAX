@@ -41,6 +41,13 @@ function [u p T] = StoSLP_closeglobal(t, s, mu, sigma, side)
 
 if nargin==0, test_StoSLP_closeglobal; return; end
 
+if nargin<5
+    side = 'e';
+end
+if nargin<4
+    sigma = [];
+end
+
 N=size(s.x,1); M=size(t.x,1);       % # srcs, # targs
 mat = isempty(sigma);
 if mat, sigma=eye(2*N); end         % case of dense matrix fill, slow

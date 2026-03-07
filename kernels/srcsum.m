@@ -32,17 +32,39 @@ if nargin==0, test_srcsum; return; end
 
 afield = isfield(s,'a');
 if isempty(phlist), phlist = 0*trlist+1.0; end
-xo = s.x; s.x = xo + trlist(1); if afield, ao = s.a; s.a = ao + trlist(1); end
+xo = s.x; s.x = xo + trlist(1); 
+if afield, ao = s.a; s.a = ao + trlist(1); end
+if isfield(s,'xlo')
+    xlo_o = s.xlo;
+    s.xlo = xlo_o + trlist(1);
+end
+if isfield(s,'xhi')
+    xhi_o = s.xhi;
+    s.xhi = xhi_o + trlist(1);
+end
+
 if nargout==1
   A = kernel(t,s,varargin{:});  % since we don't know the size can't prealloc
   for i=2:numel(trlist)
     s.x = xo + trlist(i); if afield, s.a = ao + trlist(i); end
+    if isfield(s,'xlo')
+        s.xlo = xlo_o + trlist(i);
+    end
+    if isfield(s,'xhi')
+        s.xhi = xhi_o + trlist(i);
+    end
     A = A + phlist(i)*kernel(t,s,varargin{:});
   end
 elseif nargout==2
   [A B] = kernel(t,s,varargin{:});
   for i=2:numel(trlist)
     s.x = xo + trlist(i); if afield, s.a = ao + trlist(i); end
+    if isfield(s,'xlo')
+        s.xlo = xlo_o + trlist(i);
+    end
+    if isfield(s,'xhi')
+        s.xhi = xhi_o + trlist(i);
+    end
     [Ai Bi] = kernel(t,s,varargin{:});
     A = A + phlist(i)*Ai; B = B + phlist(i)*Bi;
   end
@@ -50,6 +72,12 @@ elseif nargout==3
   [A B C] = kernel(t,s,varargin{:});
   for i=2:numel(trlist)
     s.x = xo + trlist(i); if afield, s.a = ao + trlist(i); end
+    if isfield(s,'xlo')
+        s.xlo = xlo_o + trlist(i);
+    end
+    if isfield(s,'xhi')
+        s.xhi = xhi_o + trlist(i);
+    end
     [Ai Bi Ci] = kernel(t,s,varargin{:});
     A = A + phlist(i)*Ai; B = B + phlist(i)*Bi; C = C + phlist(i)*Ci;
   end

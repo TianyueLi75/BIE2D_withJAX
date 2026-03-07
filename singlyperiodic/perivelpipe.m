@@ -1,192 +1,235 @@
 function perivelpipe(expt)
-% singly-periodic in 2D velocity-BC Stokes BVP, ie "pipe" geom w/ press drop
-% Rewrite of 2014 codes using BIE2D, as in DPLS codes. Dense E fill for now,
-% DLP only on U,D (since wrapping S quad would be harder).  12/17/17
-disp('2D 1-periodic pressure-driven pipe flow w/ vel BCs on walls')
+    % singly-periodic in 2D velocity-BC Stokes BVP, ie "pipe" geom w/ press drop
+    % Rewrite of 2014 codes using BIE2D, as in DPLS codes. Dense E fill for now,
+    % DLP only on U,D (since wrapping S quad would be harder).  12/17/17
+    disp('2D 1-periodic pressure-driven pipe flow w/ vel BCs on walls')
+    
+    % Issues:
+    % * we don't have close eval for open (periodized?) segments yet.
+    % * rewrite using periodized Stokes FMM, which should have a direct option too.
+    
+    v=1;  % verbosity=0,1,2,3
+    if nargin==0, expt='t'; end  % expt='t' test known soln, 'd' driven no-slip demo
+    
+    N=100; % Note that 40 is too low for close-eval to be effective, should be ~300.
+    % TODO: even at 300, certain values around edge still blows up.
+    m=80;
+    
+    % set up upper and lower walls
+    uc.e1 = 2*pi;   % unitcell, e1=lattice vector as a complex number
 
-% Issues:
-% * we don't have close eval for open (periodized?) segments yet.
-% * rewrite using periodized Stokes FMM, which should have a direct option too.
+    % U.Z = @(t) t + 1i*(1+0.3*sin(t)); U.Zp = @(t) 1 + 0.3i*cos(t); U.Zpp = @(t) -0.3i*sin(t);
+    % U = setupquad(U,N);   % t=0 is left end, t=2pi right end
+    % U.nx = -U.nx; U.cur = -U.cur; U.xp = -U.xp; U.tang=-U.tang; U.cw=-U.cw; % correct for sense of U, opp from periodicdirpipe
+    % D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t); D.Zpp = @(t) - 0.3i*sin(t);
+    % D = setupquad(D,N);   % same dir (left to right); pipe wall normals outwards
+    % s = mergesegquads([U,D]);
 
-v=1;  % verbosity=0,1,2,3
-if nargin==0, expt='t'; end  % expt='t' test known soln, 'd' driven no-slip demo
+    % Panel based quadr on wall
+    U = []; D = []; % clear structs
+    U.Z = @(t) (2*pi-t) + 1i*(1+0.3*sin(2*pi-t)); U.Zp = @(t) -1 - 0.3i*cos(2*pi-t); U.Zpp = @(t) -0.3i*sin(2*pi-t);
+    D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t); D.Zpp = @(t) - 0.3i*sin(t);
+    
+    % Panel based quadrature using GL grids, use axigeom functions
+    Num_panels = 40;
+    p = 10; % order on panel
+    N_perwall = p * Num_panels; qtype = 'p'; qntype = 'G'; 
+    U.p = p; D.p = p;
+    [U,~] = quadr(U, N_perwall, qtype, qntype); 
+    U.trlist = [-2*pi,2*pi];
+    U.tpan = [U.tlo;U.thi(end)];
+    U.cw = U.wxp; 
+    % U.nx = -U.nx; U.cur = -U.cur; U.xp = -U.xp; U.tang=-U.tang; U.cw=-U.cw; % correct for sense of U, opp from periodicdirpipe
+    [D,~] = quadr(D, N_perwall, qtype, qntype); 
+    D.trlist = [-2*pi,2*pi];
+    D.tpan = [D.tlo;D.thi(end)];
+    D.cw = D.wxp;
+    s = mergesegquads([U,D]);
+    s.cw = [U.cw; D.cw];
+    s.np = U.np + D.np;
+    s.tlo = [U.tlo; D.tlo];
+    s.thi = [U.thi; D.thi];
+    s.xlo = [U.xlo; D.xlo];
+    s.xhi = [U.xhi; D.xhi];
+    s.ws = [U.ws; D.ws];
+    s.wxp = [U.wxp; D.wxp];
+    s.tpan = [U.tpan; D.tpan];
+    % inside = @(z) imag(z-D.Z(real(z)))>0 & imag(z-U.Z(real(z)))<0; % Note: this also assumes input z is same domain and ratio as input t..
+    % Instead, form UX, DX functions of x..
+    UX = @(x) x + 1i*(1+0.3*sin(x));
+    DX = @(x) x + 1i*(-1+0.3*sin(x));
+    % inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0; 
+    
+    % % Choco Jan 2026: For unit test on JAX, save SLP and DLP matrices
+    % mu = 0.7;
+    % ttemp.x = 2+0.2j; ttemp.nx = 1+0j;
+    % [u,p,T] = StoSLP(ttemp, s, mu);
+    % save('SL.mat','u','p','T');
+    % [u,p,T] = StoDLP(ttemp, s, mu);
+    % save('DL.mat','u','p','T');
+    % [u,p,T] = StoSLP(s, s, mu);
+    % save('SLself.mat','u','p','T');
+    % [u,p,T] = StoDLP(s, s, mu);
+    % save('DLself.mat','u','p','T');
+    
+    % Choco Dec 2025: add particle
+    Nptcl = N;
+    ptcl.Z = @(t) 1 + 0.3*cos(t) + 1j*(0.3*sin(t)+0.25);
+    ptcl.Zp = @(t) - 0.3*sin(t) + 1j*0.3*cos(t);
+    ptcl.Zpp = @(t) - 0.3*cos(t) - 1j*0.3*sin(t);
+    ptcl = setupquad(ptcl, Nptcl);
+    ptcl.a = 1+0.25i; % a point in interior, use center. (needed for LapSLP close eval)
+    % ptcl.nx = -ptcl.nx; ptcl.cur = -ptcl.cur; ptcl.xp = -ptcl.xp; ptcl.tang=-ptcl.tang; ptcl.cw=-ptcl.cw; % correct for sense of ptcl, opp from periodicdirpipe
+    % Add geometric properties for near/far target separation (Choco Mar
+    % 2026), also used in inside()..
+    ptcl.xc = 1+0.25i;
+    ptcl.max_r = 0.3;
+    
+    ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
+    ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
+    ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
+    ptcl2 = setupquad(ptcl2, Nptcl);
+    ptcl2.a = 5; % a point in interior, use center. (needed for LapSLP close eval)
+    % ptcl2.nx = -ptcl2.nx; ptcl2.cur = -ptcl2.cur; ptcl2.xp = -ptcl2.xp; ptcl2.tang=-ptcl2.tang; ptcl2.cw=-ptcl2.cw; % correct for sense of ptcl, opp from periodicdirpipe
+    ptcl2.xc = 5;
+    ptcl2.max_r = 0.2;
+    
+    ptcl_cell = {ptcl,ptcl2};
+    ptcl_tot = mergesegquads([ptcl,ptcl2]);
+    
+    inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & abs(z-ptcl.xc)>ptcl.max_r & abs(z-ptcl2.xc)>ptcl2.max_r;
+    
+    % zt.x = [2+0.01i; 4+0.01i];    % point to test u soln at (expt='t' only)
+    zt.x = [(U.x(16) -0.005*U.nx(16)); (D.x(24)-0.005*D.nx(24))]; % 2nd panel from the right on U, 3rd panel from left on D
+    
+    % set up left and right walls
+    uc.nei = 1; % how many nei copies either side (use eg 1e3 to test A w/o AP)
+    uc.trlist = uc.e1*(-uc.nei:uc.nei);  % list of translations for direct images
+    [x w] = gauss(m); x = (1+x)/2; w = w'/2; % quadr on [0,1]
+    % Note: assumes U.x(end) and D.x(0) match at same x..
+    H = U.x(end)-D.x(1); L.x = D.Z(0) + H*x; L.nx = 0*L.x+1; L.w = H*w; % left side
+    R = L; R.x = L.x+uc.e1; % right side
+    uc.L = L; uc.R = R;
+    
+    % set up aux periodizing basis
+    proxyrep = @StoSLP;      % sets proxy pt type via a kernel function call
+    Rp = 1.1*2*pi; 
+    M = 2*m;    % # proxy pts (2 force comps per pt, so 2M dofs)
+    P.x = pi + Rp*exp(2i*pi*(0:M-1)'/M); P = setupquad(P);     % proxy pts
+    % if v>1, figure; showsegment({U,D,ptcl_tot},uc.trlist); showsegment({L,R}); plot(P.x,'r+'); plot(zt.x,'go'); 
+        % plot(ptcl.x);  
+    % end
+    
+    mu = 0.7;                                           % fluid viscosity
+    if expt=='t' % Exact soln: either periodic or plus fixed pressure drop / period:
+      % ue = @(x) [1+0*x; -2+0*x]; pe = @(x) 0*x; % the exact soln: uniform rigid flow, constant pressure everywhere (no drop)
+      % h=.2; ue = @(x) h*[imag(x).^2;0*x]; pe = @(x) h*2*mu*real(x); % horiz Poisseuil flow (has pres drop)
+      ue = @(x) [1+0*x;0.5+0*x]; pe = @(x) 0*x;
+      % disp('expt=t: running known Poisseuil flow BVP...')
+      vrhs = ue(s.x);        % bdry vel data: NB ordering Ux,Dx,Uy,Dy !
+      vrhs_ptcl = ue(ptcl_tot.x);
+      jump = pe(uc.e1)-pe(0); % known pressure growth across one period (a number)
+    elseif expt=='d'
+      vrhs = zeros(2*numel(s.x),1);     % no-slip BCs, ie homog vel data on U,D
+      vrhs_ptcl = zeros(2*numel(ptcl_tot.x),1);
+      jump = -1;              % given pressure driving, for flow +x (a number)
+      disp('expt=d: solving no-slip pressure-driven flow in pipe...')
+    end
+    
+    tic
+    % [E,A,B,C,Q] = ELSmatrix(s,p,proxyrep,mu,uc);                % fill
+    % [E,A,B,C,Q] = ELSmatrix_sldl(s,ptcl,p,proxyrep,mu,uc); 
+    [E,A,B,C,Q] = ELSmatrix_multi(s,ptcl_cell,P,proxyrep,mu,uc); 
+    
+    % data = load("Emat.mat");
+    % A_jax = data.A;
+    % B_jax = data.B;
+    % C_jax = data.C;
+    % Q_jax = data.Q;
+    % norm(A_jax-A)
+    % norm(B_jax-B)
+    % norm(C_jax-C)
+    % norm(Q_jax-Q)
+    
+    % %{
+    Tjump = -jump * [real(R.nx);imag(R.nx)]; % traction driving growth (vector func)
+    % erhs = [vrhs; zeros(2*m,1);Tjump];       % expanded lin sys RHS
+    erhs = [vrhs; vrhs_ptcl; zeros(2*m,1);Tjump]; 
+    
+    warning('off','MATLAB:nearlySingularMatrix')  % backward-stable ill-cond is ok!
+    warning('off','MATLAB:rankDeficientMatrix')
+    lso.RECT = true;  % linsolve opts, forces QR even when square
+    co = linsolve(E,erhs,lso);                           % direct bkw stable solve
+    toc
+    fprintf('resid norm = %.3g\n',norm(E*co - erhs))
+    sig = co(1:2*numel(s.x)); 
+    % psi = co(1+2*numel(s.x):end);
+    % fprintf("density norm = %.3g, proxy norm = %.3g\n", norm(sig), norm(psi));
+    sig_ptcl = co(1+2*numel(s.x):2*numel(s.x)+2*numel(ptcl_tot.x));
+    psi = co(2*numel(s.x)+2*numel(ptcl_tot.x)+1:end);
+    fprintf('density norm = %.3g, ptcl denstiy norm = %.3g, proxy norm = %.3g\n',norm(sig)/numel(sig), norm(sig_ptcl)/numel(sig_ptcl), norm(psi)/numel(psi))
+    [ut, pt] = evalsol_sldl_near(s,ptcl_tot,ptcl_cell,P,proxyrep,mu,uc,zt.x,co);
+    % [ut, pt] = evalsol_sldl(s,ptcl_tot,P,proxyrep,mu,uc,zt.x,co);
+    % [ut,pt] = evalsol(s,P,proxyrep,mu,uc,zt.x,co);
+    
+    format longE
+    % ut
+    if expt=='t'                         % check vs known soln at the point zt
+        fprintf('u velocity err at zt = %.3g \n', norm(ut-ue(zt.x)))
+        fprintf('perr at zt: ')
+        pt-pe(zt.x)
+    else
+        % fprintf('u velocity at zt = [%.15g, %.15g]; p at zt = %.15g \n', ut(1),ut(2),pt);
+        fprintf('u velocity at zt: ')
+        ut
+        fprintf('p at zt: ')
+        pt
+    end
 
-N=40;
-m=40;
-
-% set up upper and lower walls
-uc.e1 = 2*pi;   % unitcell, e1=lattice vector as a complex number
-% N = 80;     % pts per top and bottom wall (enough for 1e-15 in this case)
-% N = 4;
-U.Z = @(t) t + 1i*(1+0.3*sin(t)); U.Zp = @(t) 1 + 0.3i*cos(t); U.Zpp = @(t) -0.3i*sin(t);
-% ----------------------
-% U.Z = @(t) t + 1i; U.Zp = @(t) 1+0*t; U.Zpp = @(t) 0*t;
-%  ---------------------------
-U = setupquad(U,N);   % t=0 is left end, t=2pi right end
-U.nx = -U.nx; U.cur = -U.cur; U.xp = -U.xp; U.tang=-U.tang; U.cw=-U.cw; % correct for sense of U, opp from periodicdirpipe
-% reorder pts, makes no diff...
-%U.x=U.x(end:-1:1); U.nx=U.nx(end:-1:1); U.xp=U.xp(end:-1:1); U.xpp=U.xpp(end:-1:1); U.tang=U.tang(end:-1:1); U.cw=U.cw(end:-1:1); U.w=U.w(end:-1:1); U.sp=U.sp(end:-1:1); U.cur=U.cur(end:-1:1); 
-
-D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t);
-D.Zpp = @(t) - 0.3i*sin(t);
-% ----------------------
-% D.Z = @(t) t - 1i; D.Zp = @(t) 1+0*t; D.Zpp = @(t) 0*t;
-%  ---------------------------
-D = setupquad(D,N);   % same dir (left to right); pipe wall normals outwards
-% inside = @(z) imag(z-D.Z(real(z)))>0 & imag(z-U.Z(real(z)))<0; % ok U,D graphs
-s = mergesegquads([U,D]);
-
-% Choco Jan 2026: For unit test on JAX, save SLP and DLP matrices
-mu = 0.7;
-ttemp.x = 2+0.2j; ttemp.nx = 1+0j;
-[u,p,T] = StoSLP(ttemp, s, mu);
-save('SL.mat','u','p','T');
-[u,p,T] = StoDLP(ttemp, s, mu);
-save('DL.mat','u','p','T');
-[u,p,T] = StoSLP(s, s, mu);
-save('SLself.mat','u','p','T');
-[u,p,T] = StoDLP(s, s, mu);
-save('DLself.mat','u','p','T');
-
-% Choco Dec 2025: add particle
-Nptcl = N;
-ptcl.Z = @(t) 1 + 0.3*cos(t) + 1j*(0.3*sin(t)+0.25);
-ptcl.Zp = @(t) - 0.3*sin(t) + 1j*0.3*cos(t);
-ptcl.Zpp = @(t) - 0.3*cos(t) - 1j*0.3*sin(t);
-ptcl = setupquad(ptcl, Nptcl);
-ptcl.nx = -ptcl.nx; ptcl.cur = -ptcl.cur; ptcl.xp = -ptcl.xp; ptcl.tang=-ptcl.tang; ptcl.cw=-ptcl.cw; % correct for sense of ptcl, opp from periodicdirpipe
-% inside = @(z) imag(z-D.Z(real(z)))>0 & imag(z-U.Z(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x));
-
-ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
-ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
-ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
-ptcl2 = setupquad(ptcl2, Nptcl);
-ptcl2.nx = -ptcl2.nx; ptcl2.cur = -ptcl2.cur; ptcl2.xp = -ptcl2.xp; ptcl2.tang=-ptcl2.tang; ptcl2.cw=-ptcl2.cw; % correct for sense of ptcl, opp from periodicdirpipe
-
-ptcl_cell = {ptcl,ptcl2};
-
-ptcl_tot = mergesegquads([ptcl,ptcl2]);
-inside = @(z) imag(z-D.Z(real(z)))>0 & imag(z-U.Z(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl_tot.x),imag(ptcl_tot.x));
-
-zt.x = [2+0.2i; 4+0.1i];    % point to test u soln at (expt='t' only)
-
-% set up left and right walls
-uc.nei = 1; % how many nei copies either side (use eg 1e3 to test A w/o AP)
-uc.trlist = uc.e1*(-uc.nei:uc.nei);  % list of translations for direct images
-% m = 80;    % pts per side wall
-% m = 4;
-[x w] = gauss(m); x = (1+x)/2; w = w'/2; % quadr on [0,1]
-H = U.Z(0)-D.Z(0); L.x = D.Z(0) + H*x; L.nx = 0*L.x+1; L.w = H*w; % left side
-R = L; R.x = L.x+uc.e1; % right side
-uc.L = L; uc.R = R;
-
-% set up aux periodizing basis
-proxyrep = @StoSLP;      % sets proxy pt type via a kernel function call
-Rp = 1.1*2*pi; 
-M = 2*m;    % # proxy pts (2 force comps per pt, so 2M dofs)
-p.x = pi + Rp*exp(2i*pi*(0:M-1)'/M); p = setupquad(p);     % proxy pts
-if v>1, figure; showsegment({U,D,ptcl_tot},uc.trlist); showsegment({L,R}); plot(p.x,'r+'); plot(zt.x,'go'); 
-    % plot(ptcl.x);  
-end
-
-mu = 0.7;                                           % fluid viscosity
-if expt=='t' % Exact soln: either periodic or plus fixed pressure drop / period:
-  % ue = @(x) [1+0*x; -2+0*x]; pe = @(x) 0*x; % the exact soln: uniform rigid flow, constant pressure everywhere (no drop)
-  h=.2; ue = @(x) h*[imag(x).^2;0*x]; pe = @(x) h*2*mu*real(x); % horiz Poisseuil flow (has pres drop)
-  % disp('expt=t: running known Poisseuil flow BVP...')
-  vrhs = ue(s.x);        % bdry vel data: NB ordering Ux,Dx,Uy,Dy !
-  vrhs_ptcl = ue(ptcl_tot.x);
-  jump = pe(uc.e1)-pe(0); % known pressure growth across one period (a number)
-elseif expt=='d'
-  vrhs = zeros(2*numel(s.x),1);     % no-slip BCs, ie homog vel data on U,D
-  vrhs_ptcl = zeros(2*numel(ptcl_tot.x),1);
-  jump = -1;              % given pressure driving, for flow +x (a number)
-  disp('expt=d: solving no-slip pressure-driven flow in pipe...')
-end
-
-tic
-% [E,A,B,C,Q] = ELSmatrix(s,p,proxyrep,mu,uc);                % fill
-% [E,A,B,C,Q] = ELSmatrix_sldl(s,ptcl,p,proxyrep,mu,uc); 
-[E,A,B,C,Q] = ELSmatrix_multi(s,ptcl_cell,p,proxyrep,mu,uc); 
-
-% data = load("Emat.mat");
-% A_jax = data.A;
-% B_jax = data.B;
-% C_jax = data.C;
-% Q_jax = data.Q;
-% norm(A_jax-A)
-% norm(B_jax-B)
-% norm(C_jax-C)
-% norm(Q_jax-Q)
-
-% %{
-Tjump = -jump * [real(R.nx);imag(R.nx)]; % traction driving growth (vector func)
-% erhs = [vrhs; zeros(2*m,1);Tjump];       % expanded lin sys RHS
-erhs = [vrhs; vrhs_ptcl; zeros(2*m,1);Tjump]; 
-
-warning('off','MATLAB:nearlySingularMatrix')  % backward-stable ill-cond is ok!
-warning('off','MATLAB:rankDeficientMatrix')
-lso.RECT = true;  % linsolve opts, forces QR even when square
-co = linsolve(E,erhs,lso);                           % direct bkw stable solve
-toc
-fprintf('resid norm = %.3g\n',norm(E*co - erhs))
-sig = co(1:2*numel(s.x)); 
-sig_ptcl = co(1+2*numel(s.x):2*numel(s.x)+2*numel(ptcl_tot.x));
-psi = co(2*numel(s.x)+2*numel(ptcl_tot.x)+1:end);
-fprintf('density norm = %.3g, ptcl denstiy norm = %.3g, proxy norm = %.3g\n',norm(sig), norm(sig_ptcl), norm(psi))
-[ut pt] = evalsol_sldl(s,ptcl_tot,p,proxyrep,mu,uc,zt.x,co);
-% [ut pt] = evalsol(s,p,proxyrep,mu,uc,zt.x,co);
-
-
-format longE
-% ut
-if expt=='t'                         % check vs known soln at the point zt
-  fprintf('u velocity err at zt = %.3g \n', norm(ut-ue(zt.x)))
-  fprintf('perr at zt: ')
-  pt-pe(zt.x)
-else, 
-    % fprintf('u velocity at zt = [%.15g, %.15g]; p at zt = %.15g \n', ut(1),ut(2),pt);
-    fprintf('u velocity at zt: ')
-    ut
-    fprintf('p at zt: ')
-    pt
-end
-
-
-
-if v   % plots
-      nx = 80; gx = 2*pi*((1:nx)-0.5)/nx; ny = nx; gy = gx - pi; % plotting grid
-      % gy = 6.0/5.0 * (((1:ny)-0.5)/ny - 0.5); % Choco Jan2026: to avoid
-      % near eval errors and visualize actual interior to sin pile.
-      [xx yy] = meshgrid(gx,gy); t.x = xx(:)+1i*yy(:); Mt = numel(t.x);
-      di = reshape(inside(t.x),size(xx));  % boolean if inside domain
-      if expt=='t', ueg = ue(t.x);      % evaluate & show known soln on grid...
+    % % Compare all near vs far evals, at these targets they should be the same.
+    % fprintf("u difference closeglobal vs regular: %.3g \n", norm(ut_near - ut));
+    % fprintf("p difference closeglobal vs regular: %.3g \n", norm(pt_near - pt));
+    
+    
+    if v   % plots
+        nx = 100; gx = 2*pi*((1:nx)-0.5)/nx; ny = nx; gy = gx - pi; % plotting grid
+        % gy = 6.0/5.0 * (((1:ny)-0.5)/ny - 0.5); % Choco Jan2026: to avoid
+        % near eval errors and visualize actual interior to sin pile.
+        [xx yy] = meshgrid(gx,gy); t.x = xx(:)+1i*yy(:); Mt = numel(t.x);
+        di = reshape(inside(t.x),size(xx));  % boolean if inside domain
+        if expt=='t'
+            ueg = ue(t.x);      % evaluate & show known soln on grid...
             ue1 = reshape(ueg(1:Mt),size(xx)); ue2 = reshape(ueg(Mt+(1:Mt)),size(xx));
             peg = reshape(pe(t.x),size(xx));
-            figure; imagesc(gx,gy, peg); colormap(jet(256)); colorbar;
-            hold on; quiver(gx,gy, ue1,ue2, 10);
-      else, figure; end
-      showsegment({U,D,ptcl_tot},uc.trlist); showsegment({L,R}); plot(p.x,'r+'); plot(zt.x,'go'); 
-      text(-.5,0,'L');text(2*pi+.5,0,'R');text(4,-1,'D');text(pi,0.5,'U');
-      title('geom'); if expt=='t',title('geom and (u,p) known soln'); end
-      % eval and plot soln...
-      ug = nan(size([t.x;t.x])); pg = nan(size(t.x)); ii = inside(t.x);
-
-      % [ug([ii;ii]) pg(ii)] = evalsol(s,p,proxyrep,mu,uc,t.x(ii),co);
-      [ug([ii;ii]) pg(ii)] = evalsol_sldl(s,ptcl_tot,p,proxyrep,mu,uc,t.x(ii),co);
-
-      u1 = reshape(ug(1:Mt),size(xx)); u2 = reshape(ug(Mt+(1:Mt)),size(xx));
-      pp = reshape(pg,size(xx)); pp = pp - pp(ceil(ny/2),1); % zero p mid left edge
-      figure; 
-      % imagesc(gx,gy, pp); colormap(jet(256));
-      % caxis(sort([0 jump])); colorbar;
-      % hold on; 
-      magvals = sqrt(u1.^2 + u2.^2);
-      imagesc(gx,gy,log10(magvals)); colormap(jet(256)); colorbar; hold on; % Choco jan2026: plot magnitudes to see if no-slip was respected.
-      quiver(gx,gy, u1,u2); title('soln (u,p), w/o close-eval scheme')
-      showsegment({U,D,ptcl_tot}); showsegment({L,R}); plot(zt.x,'go'); 
-      % plot(ptcl.x);
-      if expt=='t'     % show error vs known...
+            % figure; imagesc(gx,gy, peg); colormap(jet(256)); colorbar;
+            % hold on; quiver(gx,gy, ue1,ue2, 10);
+        else
+            % figure; 
+        end
+        % showsegment({U,D,ptcl_tot},uc.trlist); showsegment({L,R}); plot(P.x,'r+'); plot(zt.x,'go'); 
+        % text(-.5,0,'L');text(2*pi+.5,0,'R');text(4,-1,'D');text(pi,0.5,'U');
+        % title('geom'); if expt=='t',title('geom and (u,p) known soln'); end
+        % eval and plot soln...
+        ug = nan(size([t.x;t.x])); pg = nan(size(t.x)); ii = inside(t.x);
+        
+        % [ug([ii;ii]) pg(ii)] = evalsol_sldl(s,ptcl_tot,P,proxyrep,mu,uc,t.x(ii),co);
+        [ug([ii;ii]) pg(ii)] = evalsol_sldl_near(s,ptcl_tot,ptcl_cell,P,proxyrep,mu,uc,t.x(ii),co);
+        
+        u1 = reshape(ug(1:Mt),size(xx)); u2 = reshape(ug(Mt+(1:Mt)),size(xx));
+        pp = reshape(pg,size(xx)); pp = pp - pp(ceil(ny/2),1); % zero p mid left edge
+        figure; 
+        % imagesc(gx,gy, pp); colormap(jet(256));
+        % caxis(sort([0 jump])); colorbar;
+        % hold on; 
+        magvals = sqrt(u1.^2 + u2.^2);
+        imagesc(gx,gy,log10(magvals)); % colormap(jet(256)); 
+        colorbar; hold on; % Choco jan2026: plot magnitudes to see if no-slip was respected.
+        quiver(gx,gy, u1,u2); 
+        title('soln (u,p), with close-eval scheme')
+        showsegment({U,D,ptcl_tot}); showsegment({L,R}); plot(zt.x,'go'); 
+        
+        % plot(ptcl.x);
+        if expt=='t'     % show error vs known...
             i=ceil(ny/2); j=ceil(nx/4); % index interior pt to get pres const
             pp = pp - pp(i,j) + peg(i,j);     % shift const in pres to match known
             eg2 = sum([u1(:)-ue1(:),u2(:)-ue2(:)].^2,2); % squared ptwise vector L2 errs
@@ -196,147 +239,375 @@ if v   % plots
             subplot(1,2,2); imagesc(gx,gy,log10(abs(pp-reshape(peg,size(xx)))));
             axis xy equal tight; caxis([-16 0]); colorbar; hold on;
             plot(U.x,'k.-'); plot(D.x,'k.-'); title('log_{10} p err (up to const)');
-      end
+        end
+    end
+    % %}
 end
-% %}
-
-% keyboard % don't forget to use dbquit to finish otherwise trapped in debug mode
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% end main %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-function [u p] = evalsol(s,pr,proxyrep,mu,U,z,co,close) % eval soln rep u,p
-% z = list of targets as C values. pr = proxy struct, s = source curve struct
-% co = full coeff vec, U = unit cell struct, mu = viscosity. DLP only.
-% Note: not for self-eval since srcsum2 used, 6/30/16. Taken from fig_stoconvK1.
-% TODO: implement close eval.
-if nargin<8, close=0; end              % default is plain native quadr
-if close, error('close not implemented for open segments!'); end
-z = struct('x',z);                     % make targets z a segment struct
-N = numel(s.x);
-sig = co(1:2*N); psi = co(2*N+1:end);  % split into sig (density) & psi (proxy)
-if close
-  % D = @(t,s,mu,dens) StoDLP_closeglobal(t,s,mu,dens,'e'); % exterior
-  D = @(t,s,mu,dens) StoDLP_closeglobal(t,s,mu,dens,'e');
-% else, D = @StoDLP; end                 % NB now native & close have same 4 args
-else, D = @StoDLP; end
-if nargout==1                          % don't want pressure output
-  u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
-  u = u + srcsum2(D,U.trlist,[],z,s,mu,sig);
-else  
-  [u p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
-  [uD pD] = srcsum2(D,U.trlist,[],z,s,mu,sig);
-  u = u + uD;
-  p = p + pD;
+    % keyboard % don't forget to use dbquit to finish otherwise trapped in debug mode
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% end main %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
+function [u, p] = evalsol(s,pr,proxyrep,mu,U,z,co,close) % eval soln rep u,p
+    % z = list of targets as C values. pr = proxy struct, s = source curve struct
+    % co = full coeff vec, U = unit cell struct, mu = viscosity. DLP only.
+    % Note: not for self-eval since srcsum2 used, 6/30/16. Taken from fig_stoconvK1.
+    % TODO: implement close eval.
+    if nargin<8
+        close=0; 
+    end              % default is plain native quadr
+    if close
+        error('close not implemented for open segments!'); 
+    end
+    z = struct('x',z);                     % make targets z a segment struct
+    N = numel(s.x);
+    sig = co(1:2*N); psi = co(2*N+1:end);  % split into sig (density) & psi (proxy)
+    if close
+      % D = @(t,s,mu,dens) StoDLP_closeglobal(t,s,mu,dens,'e'); % exterior
+      D = @(t,s,mu,dens) StoDLP_closeglobal(t,s,mu,dens,'e');
+    % else, D = @StoDLP; end                 % NB now native & close have same 4 args
+    else
+        D = @StoDLP; 
+    end
+    if nargout==1                          % don't want pressure output
+      u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
+      u = u + srcsum2(D,U.trlist,[],z,s,mu,sig);
+    else  
+      [u p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
+      [uD pD] = srcsum2(D,U.trlist,[],z,s,mu,sig);
+      u = u + uD;
+      p = p + pD;
+    end
 end
-
+    
 % Choco Jan2026: DL+SL formulation, with same density
-function [u p] = evalsol_sldl(s,ptcl,pr,proxyrep,mu,U,z,co) % eval soln rep u,p
-z = struct('x',z);                     % make targets z a segment struct
-N = numel(s.x);
-sig = co(1:2*N);
-sig_ptcl = co(1+2*N:2*N+2*numel(ptcl.x));
-psi = co(2*N+2*numel(ptcl.x)+1:end);  
-if nargout==1                          % don't want pressure output
-  u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
-  u = u + srcsum(@StoDLP,U.trlist,[],z,s,mu,sig);
-  u = u + srcsum(@StoSLP,U.trlist,[],z,ptcl,mu,sig_ptcl) + srcsum(@StoDLP,U.trlist,[],z,ptcl,mu,sig_ptcl);
-else  
-  [u p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
-  [uD pD] = srcsum(@StoDLP,U.trlist,[],z,s,mu,sig);
-  [uDptcl pDptcl] = srcsum(@StoDLP,U.trlist,[],z,ptcl,mu,sig_ptcl);
-  [uSptcl pSptcl] = srcsum(@StoSLP,U.trlist,[],z,ptcl,mu,sig_ptcl);
-  u = u + uD + uDptcl + uSptcl;
-  p = p + pD + pDptcl + pSptcl;
+function [u, p] = evalsol_sldl(s,ptcl,pr,proxyrep,mu,U,z,co) % eval soln rep u,p
+    z = struct('x',z);                     % make targets z a segment struct
+    N = numel(s.x);
+    sig = co(1:2*N);
+    sig_ptcl = co(1+2*N:2*N+2*numel(ptcl.x));
+    psi = co(2*N+2*numel(ptcl.x)+1:end);  
+    if nargout==1                          % don't want pressure output
+      u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
+      u = u + srcsum(@StoDLP,U.trlist,[],z,s,mu,sig);
+      u = u + srcsum(@StoSLP,U.trlist,[],z,ptcl,mu,sig_ptcl) + srcsum(@StoDLP,U.trlist,[],z,ptcl,mu,sig_ptcl);
+    else  
+      [u p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
+      [uD pD] = srcsum(@StoDLP,U.trlist,[],z,s,mu,sig);
+      [uDptcl pDptcl] = srcsum(@StoDLP,U.trlist,[],z,ptcl,mu,sig_ptcl);
+      [uSptcl pSptcl] = srcsum(@StoSLP,U.trlist,[],z,ptcl,mu,sig_ptcl);
+      u = u + uD + uDptcl + uSptcl;
+      p = p + pD + pDptcl + pSptcl;
+    end
+end
+    
+    
+function [u, p] = evalsol_sldl_near(s,ptcl_tot,ptcl_cell,pr,proxyrep,mu,U,z,co) % eval soln rep u,p
+
+    z = struct('x',z);                     % make targets z a segment struct
+    N = numel(s.x);
+    sig = co(1:2*N);
+    sig_ptcl_tot = co(2*N + (1:2*numel(ptcl_tot.x)));
+    psi = co(2*N+2*numel(ptcl_tot.x)+1:end);  
+    if nargout==1                          % don't want pressure output
+        u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
+        u = u + srcsum(@StoDLP_closepanel,U.trlist,[],z,s,mu,sig); 
+        start_ind = 0;
+        ptcl_DL = @(t,s,mu,sigma) StoDLP_closeglobal(t,s,mu,sigma,'e');
+        ptcl_SL = @(t,s,mu,sigma) StoSLP_closeglobal(t,s,mu,sigma,'e');
+        for ptcl_ind=1:numel(ptcl_cell)
+            ptcl_here = ptcl_cell{ptcl_ind};
+            sig_ptcl = [sig_ptcl_tot(start_ind + (1:numel(ptcl_here.x))); sig_ptcl_tot(numel(ptcl_tot.x) + start_ind + (1:numel(ptcl_here.x)))];
+            u = u + srcsum(ptcl_SL,U.trlist,[],z,ptcl_here,mu,sig_ptcl) + srcsum(ptcl_DL,U.trlist,[],z,ptcl_here,mu,sig_ptcl);
+            start_ind = start_ind + numel(ptcl_here.x);
+        end
+    else  
+        [u, p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
+        [uD, pD] = srcsum(@StoDLP_closepanel,U.trlist,[],z,s,mu,sig);
+        u = u + uD;
+        p = p + pD;
+        start_ind = 0;
+        ptcl_DL = @(t,s,mu,sigma) StoDLP_closeglobal(t,s,mu,sigma,'e');
+        ptcl_SL = @(t,s,mu,sigma) StoSLP_closeglobal(t,s,mu,sigma,'e');
+        for ptcl_ind=1:numel(ptcl_cell)
+            ptcl_here = ptcl_cell{ptcl_ind};
+            sig_ptcl = [sig_ptcl_tot(start_ind + (1:numel(ptcl_here.x))); sig_ptcl_tot(numel(ptcl_tot.x) + start_ind + (1:numel(ptcl_here.x)))];
+            [uDptcl, pDptcl] = srcsum(ptcl_DL,U.trlist,[],z,ptcl_here,mu,sig_ptcl);
+            [uSptcl, pSptcl] = srcsum(ptcl_SL,U.trlist,[],z,ptcl_here,mu,sig_ptcl);
+            u = u + uDptcl + uSptcl;
+            p = p + pDptcl + pSptcl;
+            start_ind = start_ind + numel(ptcl_here.x);
+        end
+      
+    end
 end
 
 
+% Version that separates targets
+function [u, p] = evalsol_sldl_near2(s,ptcl_tot,ptcl_cell,pr,proxyrep,mu,U,z,co) % eval soln rep u,p
+    z = struct('x',z);                     % make targets z a segment struct
+    N = numel(s.x);
+    sig = co(1:2*N);
+    sig_ptcl_tot = co(2*N + (1:2*numel(ptcl_tot.x)));
+    psi = co(2*N+2*numel(ptcl_tot.x)+1:end);  
+
+    if nargout==1                          % don't want pressure output
+        u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
+        u = u + srcsum(@StoDLP,U.trlist,[],z,s,mu,sig); % TODO: putting DLP close global here destroys accuracy.
+        start_ind = 0;
+        for ptcl_ind=1:numel(ptcl_cell)
+            ptcl_here = ptcl_cell{ptcl_ind};
+            if ~isfield(ptcl_here,'xc')
+                fprintf("\n warning, particle center not set, getting (and setting) it numerically via ptcl.x. \n");
+                ptcl_here.xc = sum(real(ptcl_here.x))/numel(ptcl_here.x) + 1j * sum(imag(ptcl_here.x))/numel(ptcl_here.x);
+            end 
+            if ~isfield(ptcl_here,'max_r')
+                fprintf("\n ptcl's max_r is not set, getting (and setting) it numerically via ptcl.x. \n");
+                dist_all = ptcl_here.x - ptcl_here.xc;
+                dist_all = abs(dist_all);
+                ptcl_here.max_r = max(dist_all);
+            end
+            sig_ptcl = [sig_ptcl_tot(start_ind + (1:numel(ptcl_here.x))); sig_ptcl_tot(numel(ptcl_tot.x) + start_ind + (1:numel(ptcl_here.x)))];
+            % Separate targets
+            near_sep = 1.25.*ptcl_here.max_r; % arbitrary near cutoff - 1.5 x max r.
+            trg_near_ind = (abs(z.x - ptcl_here.xc) < near_sep);
+            trg_near.x = z.x((trg_near_ind==1));
+            trg_far.x = z.x((trg_near_ind==0));
+            if isfield(z,'nx')
+                trg_near.nx = z.nx((trg_near_ind==1));
+                trg_far.nx = z.nx((trg_near_ind==0));
+            end
+            uptcl = zeros(size(u));
+            uptcl([(trg_near_ind==1);(trg_near_ind==1)]) = uptcl([(trg_near_ind==1);(trg_near_ind==1)]) + srcsum(@StoSLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl) + srcsum(@StoDLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl);
+            uptcl([(trg_near_ind==0);(trg_near_ind==0)]) = uptcl([(trg_near_ind==0);(trg_near_ind==0)]) + srcsum(@StoSLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl) + srcsum(@StoDLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl);
+            u = u + uptcl;
+            start_ind = start_ind + numel(ptcl_here.x);
+        end
+    else  
+        [u, p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
+        [uD, pD] = srcsum(@StoDLP,U.trlist,[],z,s,mu,sig);
+        u = u + uD;
+        p = p + pD;
+        start_ind = 0;
+        for ptcl_ind=1:numel(ptcl_cell)
+            ptcl_here = ptcl_cell{ptcl_ind};
+            if ~isfield(ptcl_here,'xc')
+                fprintf("\n warning, particle center not set, getting (and setting) it numerically via ptcl.x. \n");
+                ptcl_here.xc = sum(real(ptcl_here.x))/numel(ptcl_here.x) + 1j * sum(imag(ptcl_here.x))/numel(ptcl_here.x);
+            end 
+            if ~isfield(ptcl_here,'max_r')
+                fprintf("\n ptcl's max_r is not set, getting (and setting) it numerically via ptcl.x. \n");
+                dist_all = ptcl_here.x - ptcl_here.xc;
+                dist_all = abs(dist_all);
+                ptcl_here.max_r = max(dist_all);
+            end
+            sig_ptcl = [sig_ptcl_tot(start_ind + (1:numel(ptcl_here.x))); sig_ptcl_tot(numel(ptcl_tot.x) + start_ind + (1:numel(ptcl_here.x)))];
+            % Separate targets
+            near_sep = 1.25.*ptcl_here.max_r; % arbitrary near cutoff - 1.5 x max r.
+            trg_near_ind = (abs(z.x - ptcl_here.xc) < near_sep);
+            trg_near.x = z.x((trg_near_ind==1));
+            trg_far.x = z.x((trg_near_ind==0));
+            if isfield(z,'nx')
+                trg_near.nx = z.nx((trg_near_ind==1));
+                trg_far.nx = z.nx((trg_near_ind==0));
+            end
+            uDptcl = zeros(size(u));
+            pDptcl = zeros(size(p));
+            uSptcl = zeros(size(u));
+            pSptcl = zeros(size(p));
+
+            [uDptcl_near, pDptcl_near] = srcsum(@StoDLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl);
+            [uSptcl_near, pSptcl_near] = srcsum(@StoSLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl);
+            [uDptcl_far, pDptcl_far] = srcsum(@StoDLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl);
+            [uSptcl_far, pSptcl_far] = srcsum(@StoSLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl);
+
+            uDptcl([(trg_near_ind==1);(trg_near_ind==1)]) = uDptcl([(trg_near_ind==1);(trg_near_ind==1)]) + uDptcl_near;
+            pDptcl((trg_near_ind==1)) = pDptcl((trg_near_ind==1)) + pDptcl_near;
+            uSptcl([(trg_near_ind==1);(trg_near_ind==1)]) = uSptcl([(trg_near_ind==1);(trg_near_ind==1)]) + uSptcl_near;
+            pSptcl((trg_near_ind==1)) = pSptcl((trg_near_ind==1)) + pSptcl_near;
+
+            uDptcl([(trg_near_ind==0);(trg_near_ind==0)]) = uDptcl([(trg_near_ind==0);(trg_near_ind==0)]) + uDptcl_far;
+            pDptcl((trg_near_ind==0)) = pDptcl((trg_near_ind==0)) + pDptcl_far;
+            uSptcl([(trg_near_ind==0);(trg_near_ind==0)]) = uSptcl([(trg_near_ind==0);(trg_near_ind==0)]) + uSptcl_far;
+            pSptcl((trg_near_ind==0)) = pSptcl((trg_near_ind==0)) + pSptcl_far;
+
+            u = u + uDptcl + uSptcl;
+            p = p + pDptcl + pSptcl;
+            start_ind = start_ind + numel(ptcl_here.x);
+        end
+      
+    end
+end
+    
+    
 function [E A B C Q] = ELSmatrix(s,p,proxyrep,mu,uc)
-% builds matrix blocks for Stokes extended linear system, D rep only
-N = numel(s.x);
-
-A = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu);  % notes: DLP gives int JR term; srcsum self is ok
-
-B = proxyrep(s,p,mu);     % map from proxy density to vel on curve
-d = uc.e1*uc.nei;         % src transl to use
-
-[CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu);
-[CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
-C = [CRD-CLD; TRD-TLD];
-
-[QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
-Q = [QR-QL; QRt-QLt];
-
-E = [A B; C Q];
+    % builds matrix blocks for Stokes extended linear system, D rep only
+    N = numel(s.x);
+    
+    A = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu);  % notes: DLP gives int JR term; srcsum self is ok
+    
+    B = proxyrep(s,p,mu);     % map from proxy density to vel on curve
+    d = uc.e1*uc.nei;         % src transl to use
+    
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu);
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
+    C = [CRD-CLD; TRD-TLD];
+    
+    [QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
+    Q = [QR-QL; QRt-QLt];
+    
+    E = [A B; C Q];
+end
+    
 
 % Choco Jan2026: dl+sl formulation on particle
 function [E A B C Q] = ELSmatrix_sldl(s,ptcl,p,proxyrep,mu,uc)
-% builds matrix blocks for Stokes extended linear system, D rep only
-N = numel(s.x);
-
-% Separate formulation for wall vs ptcl
-A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu);
-A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl,mu);
-A21 = srcsum(@StoDLP,uc.trlist,[],ptcl,s,mu);
-A22 = -eye(2*numel(ptcl.x))/2 + srcsum(@StoDLP,uc.trlist,[],ptcl,ptcl,mu) + srcsum(@StoSLP,uc.trlist,[],ptcl,ptcl,mu);
-A = [A11 A12; A21 A22];
-
-B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve
-B2 = proxyrep(ptcl,p,mu);
-B = [B1;B2];
-d = uc.e1*uc.nei;         % src transl to use
-
-[CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu); 
-[CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
-C1 = [CRD-CLD; TRD-TLD];
-[CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,ptcl,mu); 
-[CLS,~,TLS] = srcsum(@StoSLP,d,[],uc.L,ptcl,mu);
-[CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,ptcl,mu);
-[CRS,~,TRS] = srcsum(@StoSLP,-d,[],uc.R,ptcl,mu);
-C2 = [CRD-CLD + CRS-CLS; TRD-TLD + TRS-TLS];
-C = [C1 C2];
-
-[QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
-Q = [QR-QL; QRt-QLt];
-
-E = [A B; C Q];
-
-% Choc Jan 2026: dl+sl formulation; multi particle support
-function [E A B C Q] = ELSmatrix_multi(s,ptcl_cell,p,proxyrep,mu,uc)
-% builds matrix blocks for Stokes extended linear system, D rep only
-N = numel(s.x);
-% Collect info from all cells for far evals
-ptcl_tot = ptcl_cell{1};
-if numel(ptcl_cell)>1
-    for cellind=2:numel(ptcl_cell)
-        ptcl_tot = mergesegquads([ptcl_tot, ptcl_cell{cellind}]);
-    end
+    % builds matrix blocks for Stokes extended linear system, D rep only
+    N = numel(s.x);
+    
+    % Separate formulation for wall vs ptcl
+    A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu);
+    A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl,mu);
+    A21 = srcsum(@StoDLP,uc.trlist,[],ptcl,s,mu);
+    A22 = -eye(2*numel(ptcl.x))/2 + srcsum(@StoDLP,uc.trlist,[],ptcl,ptcl,mu) + srcsum(@StoSLP,uc.trlist,[],ptcl,ptcl,mu);
+    A = [A11 A12; A21 A22];
+    
+    B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve
+    B2 = proxyrep(ptcl,p,mu);
+    B = [B1;B2];
+    d = uc.e1*uc.nei;         % src transl to use
+    
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu); 
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
+    C1 = [CRD-CLD; TRD-TLD];
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,ptcl,mu); 
+    [CLS,~,TLS] = srcsum(@StoSLP,d,[],uc.L,ptcl,mu);
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,ptcl,mu);
+    [CRS,~,TRS] = srcsum(@StoSLP,-d,[],uc.R,ptcl,mu);
+    C2 = [CRD-CLD + CRS-CLS; TRD-TLD + TRS-TLS];
+    C = [C1 C2];
+    
+    [QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
+    Q = [QR-QL; QRt-QLt];
+    
+    E = [A B; C Q];
 end
-% Separate formulation for wall vs ptcl
-A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
-A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl_tot,mu); % all particle to wall
-A21 = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-% A22 = -eye(2*numel(ptcl.x))/2 + srcsum(@StoDLP,uc.trlist,[],ptcl,ptcl,mu) + srcsum(@StoSLP,uc.trlist,[],ptcl,ptcl,mu);
-A22 = -eye(2*numel(ptcl_tot.x))/2 + srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
-A = [A11 A12; A21 A22];
 
-B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve
-B2 = proxyrep(ptcl_tot,p,mu);
-B = [B1;B2];
-d = uc.e1*uc.nei;         % src transl to use
-
-[CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu); 
-[CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
-C1 = [CRD-CLD; TRD-TLD];
-[CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,ptcl_tot,mu); 
-[CLS,~,TLS] = srcsum(@StoSLP,d,[],uc.L,ptcl_tot,mu);
-[CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,ptcl_tot,mu);
-[CRS,~,TRS] = srcsum(@StoSLP,-d,[],uc.R,ptcl_tot,mu);
-C2 = [CRD-CLD + CRS-CLS; TRD-TLD + TRS-TLS];
-C = [C1 C2];
-
-[QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
-Q = [QR-QL; QRt-QLt];
-
-E = [A B; C Q];
+% Choco Jan 2026: dl+sl formulation; multi particle support
+function [E A B C Q] = ELSmatrix_multi(s,ptcl_cell,p,proxyrep,mu,uc)
+    % builds matrix blocks for Stokes extended linear system, D rep only
+    N = numel(s.x);
+    % Collect info from all cells for far evals
+    ptcl_tot = ptcl_cell{1};
+    if numel(ptcl_cell)>1
+        for cellind=2:numel(ptcl_cell)
+            ptcl_tot = mergesegquads([ptcl_tot, ptcl_cell{cellind}]);
+        end
+    end
+    % Separate formulation for wall vs ptcl
+    A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
+    % A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl_tot,mu); % all particle to wall
+    A12 = srcsum_ptcl_wrapper(@StoDLP,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    A21 = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    % DEBUGGING: All exterior for particle to avoid swapping normals etc.
+    A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
+    A = [A11 A12; A21 A22];
+    
+    B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve
+    B2 = proxyrep(ptcl_tot,p,mu);
+    B = [B1;B2];
+    d = uc.e1*uc.nei;         % src transl to use
+    
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu); 
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
+    C1 = [CRD-CLD; TRD-TLD];
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,ptcl_tot,mu); 
+    [CLS,~,TLS] = srcsum(@StoSLP,d,[],uc.L,ptcl_tot,mu);
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,ptcl_tot,mu);
+    [CRS,~,TRS] = srcsum(@StoSLP,-d,[],uc.R,ptcl_tot,mu);
+    C2 = [CRD-CLD + CRS-CLS; TRD-TLD + TRS-TLS];
+    C = [C1 C2];
+    
+    [QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
+    Q = [QR-QL; QRt-QLt];
+    
+    E = [A B; C Q];
+end
+    
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Choco Feb 2026: include RBM (net force and net torque, U and Omega in
+% ptcl B.C.
+function [E A B C Q] = ELSmatrix_rbm(s,ptcl_cell,p,proxyrep,mu,uc)
+    % builds matrix blocks for Stokes extended linear system, D rep only
+    N = numel(s.x);
+    % Collect info from all cells for far evals
+    ptcl_tot = ptcl_cell{1};
+    if numel(ptcl_cell)>1
+        for cellind=2:numel(ptcl_cell)
+            ptcl_tot = mergesegquads([ptcl_tot, ptcl_cell{cellind}]);
+        end
+    end
+    % Separate formulation for wall vs ptcl
+    A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
+    A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl_tot,mu); % all particle to wall
+    [A21,~,A21_T] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    
+    % A22 = -eye(2*numel(ptcl_tot.x))/2 + srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
+    [A22_dl,~,A22_dlT] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu);
+    [A22_sl,~,A22_slT] = srcsum_ptcl_wrapper(@StoSLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu); % TODO: add traction to srcsum_ptcl_wrapper
+    A22 = -eye(2*numel(ptcl_tot.x))/2 + A22_dl + A22_sl;
+    A = [A11 A12; A21 A22];
+    
+    % Todo: BCgammaMat size and order
+    BCgammaMat = zeros(numel(s.x)*2 + numel(ptcl_tot.x)*2, numel(s.x)*2 + numel(ptcl_tot.x)*3 + 3);
+    BCgammaMat(1:numel(s.x)*2, 1:(numel(s.x)*2+numel(ptcl_tot.x)*2)) = [A11 A12]; % start with (wall-ptcl) to wall velocity
+    for ptcl_ind=1:numel_ptcl_cell
+        % Compute force and torque per particle
+        s_sqr = ptcl_cell{ptcl_ind};
+        Xc = sum(real(s_sqr.x))/numel(s_sqr.x) + 1j*sum(imag(s_sqr.x))/numel(s_sqr.x);
+        XmXc = [real(s_sqr.x)-real(Xc).*ones(size(s_sqr.x)); imag(s_sqr.x)-imag(Xc).*ones(size(s_sqr.x))]; 
+        x_ind = numel(s.x)*2 + ptcl_ind*numel(s_sqr.x)
+        BCgammaMat(1+numel(s.x)*2 + ptcl_ind*numel(s_sqr.x))
+        BCgammaMat = [BcgammaMat;
+                    [-1.*ones(size(s_sqr.t));zeros(size(s_sqr.t))] % Ux
+                    [zeros(size(s_sqr.t));-1*ones(size(s_sqr.t))] % Uy
+                    [-XmXc(1+end/2:end)'; XmXc(1:end/2)]]; % Omega cross X-Xc.
+    end
+    % TODO: change this to correspond to ptcl B.C. and ptcl density, U, and
+    % Omega
+    BCgammaMat = [A % sqr_dens
+                [-1.*ones(size(s_sqr.t));zeros(size(s_sqr.t))] % Ux
+                [zeros(size(s_sqr.t));-1*ones(size(s_sqr.t))] % Uy
+                [-XmXc(1+end/2:end)'; XmXc(1:end/2)]]; % Omega
+    % TODO: multiply ptcl.ws(:) here for matmul with density directly
+    
+    % Force from all ptcls, wall, and proxy
+    T3 = A22_dlT + A22_slT;
+    fMat_sqr = -(-eye(size(T3))/2 + T3); 
+    fMat_wall = - A21_T;
+    fMat_prx = - B2_T;
+    
+    B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve
+    [B2,~,B2_T] = proxyrep(ptcl_tot,p,mu);
+    B = [B1;B2];
+    d = uc.e1*uc.nei;         % src transl to use
+    
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu); 
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
+    C1 = [CRD-CLD; TRD-TLD];
+    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,ptcl_tot,mu); 
+    [CLS,~,TLS] = srcsum(@StoSLP,d,[],uc.L,ptcl_tot,mu);
+    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,ptcl_tot,mu);
+    [CRS,~,TRS] = srcsum(@StoSLP,-d,[],uc.R,ptcl_tot,mu);
+    C2 = [CRD-CLD + CRS-CLS; TRD-TLD + TRS-TLS];
+    C = [C1 C2];
+    
+    [QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
+    Q = [QR-QL; QRt-QLt];
+    
+    E = [A B; C Q];
+    % TODO: Order of mats, include fMat.
+end
+    
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % for multiple particles contained in ptcl_cell, create large matrix with
 % block structure [A11 A12 ...; A21 A22 ...] 
@@ -344,9 +615,7 @@ E = [A B; C Q];
 % particle.
 % Note: currently only one output since used only in self-to-self for all
 % particles
-% TODO: this currently does not give correct, converging flow in no-slip
-% case.
-function U = srcsum_ptcl_wrapper(kernel,trlist,ptcl_cell,mu)
+function U = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
     num_ptcl = numel(ptcl_cell);
     ptcl_tot = ptcl_cell{1};
     ptcl_idx = zeros(1,num_ptcl+1); % row of starting indices for each particle
@@ -375,3 +644,25 @@ function U = srcsum_ptcl_wrapper(kernel,trlist,ptcl_cell,mu)
             U(trgind,srcind) = U(trgind, srcind) + u;
         end
     end
+end
+
+function U = srcsum_ptcl_wrapper(kernel,trlist,trg,ptcl_cell,mu)
+    num_ptcl = numel(ptcl_cell);
+    ptcl_tot = ptcl_cell{1};
+    ptcl_idx = zeros(1,num_ptcl+1); % row of starting indices for each particle
+    ptcl_idx(1) = 1; 
+    for i=2:num_ptcl
+        ptcl_tot = mergesegquads([ptcl_tot,ptcl_cell{i}]);
+        ptcl_idx(i) = ptcl_idx(i-1) + numel(ptcl_cell{i-1}.x);
+    end
+    ptcl_tot_size = numel(ptcl_tot.x);
+    ptcl_idx(num_ptcl+1) = ptcl_tot_size+1; % ghost entry for end of array
+    U = zeros(2*numel(trg.x),ptcl_tot_size*2);
+
+    for i=1:num_ptcl
+        ptcl_i = ptcl_cell{i};
+        srcind = [ptcl_idx(i):(ptcl_idx(i+1)-1),(ptcl_tot_size+ptcl_idx(i)) : (ptcl_tot_size+ptcl_idx(i+1)-1)];
+        u = srcsum(kernel,trlist,[],trg,ptcl_i,mu);
+        U(:,srcind) = u;
+    end
+end
