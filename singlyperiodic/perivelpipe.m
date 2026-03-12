@@ -60,20 +60,8 @@ function perivelpipe(expt)
     DX = @(x) x + 1i*(-1+0.3*sin(x));
     % inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0; 
     
-    % % Choco Jan 2026: For unit test on JAX, save SLP and DLP matrices
-    % mu = 0.7;
-    % ttemp.x = 2+0.2j; ttemp.nx = 1+0j;
-    % [u,p,T] = StoSLP(ttemp, s, mu);
-    % save('SL.mat','u','p','T');
-    % [u,p,T] = StoDLP(ttemp, s, mu);
-    % save('DL.mat','u','p','T');
-    % [u,p,T] = StoSLP(s, s, mu);
-    % save('SLself.mat','u','p','T');
-    % [u,p,T] = StoDLP(s, s, mu);
-    % save('DLself.mat','u','p','T');
-    
     % Choco Dec 2025: add particle
-    Nptcl = N;
+    Nptcl = 8;
     ptcl.Z = @(t) 1 + 0.3*cos(t) + 1j*(0.3*sin(t)+0.25);
     ptcl.Zp = @(t) - 0.3*sin(t) + 1j*0.3*cos(t);
     ptcl.Zpp = @(t) - 0.3*cos(t) - 1j*0.3*sin(t);
@@ -84,7 +72,7 @@ function perivelpipe(expt)
     % 2026), also used in inside()..
     ptcl.xc = 1+0.25i;
     ptcl.max_r = 0.3;
-    
+
     ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
     ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
     ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
@@ -112,6 +100,7 @@ function perivelpipe(expt)
     uc.L = L; uc.R = R;
     
     % set up aux periodizing basis
+    P = [];
     proxyrep = @StoSLP;      % sets proxy pt type via a kernel function call
     Rp = 1.1*2*pi; 
     M = 2*m;    % # proxy pts (2 force comps per pt, so 2M dofs)
@@ -141,15 +130,6 @@ function perivelpipe(expt)
     % [E,A,B,C,Q] = ELSmatrix_sldl(s,ptcl,p,proxyrep,mu,uc); 
     [E,A,B,C,Q] = ELSmatrix_multi(s,ptcl_cell,P,proxyrep,mu,uc); 
     
-    % data = load("Emat.mat");
-    % A_jax = data.A;
-    % B_jax = data.B;
-    % C_jax = data.C;
-    % Q_jax = data.Q;
-    % norm(A_jax-A)
-    % norm(B_jax-B)
-    % norm(C_jax-C)
-    % norm(Q_jax-Q)
     
     % %{
     Tjump = -jump * [real(R.nx);imag(R.nx)]; % traction driving growth (vector func)
@@ -239,6 +219,9 @@ function perivelpipe(expt)
             subplot(1,2,2); imagesc(gx,gy,log10(abs(pp-reshape(peg,size(xx)))));
             axis xy equal tight; caxis([-16 0]); colorbar; hold on;
             plot(U.x,'k.-'); plot(D.x,'k.-'); title('log_{10} p err (up to const)');
+
+            eg3 = sum([u1(ii)-ue1(ii),u2(ii)-ue2(ii)].^2,2);
+            norm(eg3)
         end
     end
     % %}
@@ -339,105 +322,7 @@ function [u, p] = evalsol_sldl_near(s,ptcl_tot,ptcl_cell,pr,proxyrep,mu,U,z,co) 
       
     end
 end
-
-
-% Version that separates targets
-function [u, p] = evalsol_sldl_near2(s,ptcl_tot,ptcl_cell,pr,proxyrep,mu,U,z,co) % eval soln rep u,p
-    z = struct('x',z);                     % make targets z a segment struct
-    N = numel(s.x);
-    sig = co(1:2*N);
-    sig_ptcl_tot = co(2*N + (1:2*numel(ptcl_tot.x)));
-    psi = co(2*N+2*numel(ptcl_tot.x)+1:end);  
-
-    if nargout==1                          % don't want pressure output
-        u = proxyrep(z,pr,mu,psi);           % init sol w/ proxies (always far)
-        u = u + srcsum(@StoDLP,U.trlist,[],z,s,mu,sig); % TODO: putting DLP close global here destroys accuracy.
-        start_ind = 0;
-        for ptcl_ind=1:numel(ptcl_cell)
-            ptcl_here = ptcl_cell{ptcl_ind};
-            if ~isfield(ptcl_here,'xc')
-                fprintf("\n warning, particle center not set, getting (and setting) it numerically via ptcl.x. \n");
-                ptcl_here.xc = sum(real(ptcl_here.x))/numel(ptcl_here.x) + 1j * sum(imag(ptcl_here.x))/numel(ptcl_here.x);
-            end 
-            if ~isfield(ptcl_here,'max_r')
-                fprintf("\n ptcl's max_r is not set, getting (and setting) it numerically via ptcl.x. \n");
-                dist_all = ptcl_here.x - ptcl_here.xc;
-                dist_all = abs(dist_all);
-                ptcl_here.max_r = max(dist_all);
-            end
-            sig_ptcl = [sig_ptcl_tot(start_ind + (1:numel(ptcl_here.x))); sig_ptcl_tot(numel(ptcl_tot.x) + start_ind + (1:numel(ptcl_here.x)))];
-            % Separate targets
-            near_sep = 1.25.*ptcl_here.max_r; % arbitrary near cutoff - 1.5 x max r.
-            trg_near_ind = (abs(z.x - ptcl_here.xc) < near_sep);
-            trg_near.x = z.x((trg_near_ind==1));
-            trg_far.x = z.x((trg_near_ind==0));
-            if isfield(z,'nx')
-                trg_near.nx = z.nx((trg_near_ind==1));
-                trg_far.nx = z.nx((trg_near_ind==0));
-            end
-            uptcl = zeros(size(u));
-            uptcl([(trg_near_ind==1);(trg_near_ind==1)]) = uptcl([(trg_near_ind==1);(trg_near_ind==1)]) + srcsum(@StoSLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl) + srcsum(@StoDLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl);
-            uptcl([(trg_near_ind==0);(trg_near_ind==0)]) = uptcl([(trg_near_ind==0);(trg_near_ind==0)]) + srcsum(@StoSLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl) + srcsum(@StoDLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl);
-            u = u + uptcl;
-            start_ind = start_ind + numel(ptcl_here.x);
-        end
-    else  
-        [u, p] = proxyrep(z,pr,mu,psi);       % init sol w/ proxies (always far)
-        [uD, pD] = srcsum(@StoDLP,U.trlist,[],z,s,mu,sig);
-        u = u + uD;
-        p = p + pD;
-        start_ind = 0;
-        for ptcl_ind=1:numel(ptcl_cell)
-            ptcl_here = ptcl_cell{ptcl_ind};
-            if ~isfield(ptcl_here,'xc')
-                fprintf("\n warning, particle center not set, getting (and setting) it numerically via ptcl.x. \n");
-                ptcl_here.xc = sum(real(ptcl_here.x))/numel(ptcl_here.x) + 1j * sum(imag(ptcl_here.x))/numel(ptcl_here.x);
-            end 
-            if ~isfield(ptcl_here,'max_r')
-                fprintf("\n ptcl's max_r is not set, getting (and setting) it numerically via ptcl.x. \n");
-                dist_all = ptcl_here.x - ptcl_here.xc;
-                dist_all = abs(dist_all);
-                ptcl_here.max_r = max(dist_all);
-            end
-            sig_ptcl = [sig_ptcl_tot(start_ind + (1:numel(ptcl_here.x))); sig_ptcl_tot(numel(ptcl_tot.x) + start_ind + (1:numel(ptcl_here.x)))];
-            % Separate targets
-            near_sep = 1.25.*ptcl_here.max_r; % arbitrary near cutoff - 1.5 x max r.
-            trg_near_ind = (abs(z.x - ptcl_here.xc) < near_sep);
-            trg_near.x = z.x((trg_near_ind==1));
-            trg_far.x = z.x((trg_near_ind==0));
-            if isfield(z,'nx')
-                trg_near.nx = z.nx((trg_near_ind==1));
-                trg_far.nx = z.nx((trg_near_ind==0));
-            end
-            uDptcl = zeros(size(u));
-            pDptcl = zeros(size(p));
-            uSptcl = zeros(size(u));
-            pSptcl = zeros(size(p));
-
-            [uDptcl_near, pDptcl_near] = srcsum(@StoDLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl);
-            [uSptcl_near, pSptcl_near] = srcsum(@StoSLP_closeglobal,U.trlist,[],trg_near,ptcl_here,mu,sig_ptcl);
-            [uDptcl_far, pDptcl_far] = srcsum(@StoDLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl);
-            [uSptcl_far, pSptcl_far] = srcsum(@StoSLP,U.trlist,[],trg_far,ptcl_here,mu,sig_ptcl);
-
-            uDptcl([(trg_near_ind==1);(trg_near_ind==1)]) = uDptcl([(trg_near_ind==1);(trg_near_ind==1)]) + uDptcl_near;
-            pDptcl((trg_near_ind==1)) = pDptcl((trg_near_ind==1)) + pDptcl_near;
-            uSptcl([(trg_near_ind==1);(trg_near_ind==1)]) = uSptcl([(trg_near_ind==1);(trg_near_ind==1)]) + uSptcl_near;
-            pSptcl((trg_near_ind==1)) = pSptcl((trg_near_ind==1)) + pSptcl_near;
-
-            uDptcl([(trg_near_ind==0);(trg_near_ind==0)]) = uDptcl([(trg_near_ind==0);(trg_near_ind==0)]) + uDptcl_far;
-            pDptcl((trg_near_ind==0)) = pDptcl((trg_near_ind==0)) + pDptcl_far;
-            uSptcl([(trg_near_ind==0);(trg_near_ind==0)]) = uSptcl([(trg_near_ind==0);(trg_near_ind==0)]) + uSptcl_far;
-            pSptcl((trg_near_ind==0)) = pSptcl((trg_near_ind==0)) + pSptcl_far;
-
-            u = u + uDptcl + uSptcl;
-            p = p + pDptcl + pSptcl;
-            start_ind = start_ind + numel(ptcl_here.x);
-        end
-      
-    end
-end
-    
-    
+  
 function [E A B C Q] = ELSmatrix(s,p,proxyrep,mu,uc)
     % builds matrix blocks for Stokes extended linear system, D rep only
     N = numel(s.x);
@@ -504,11 +389,14 @@ function [E A B C Q] = ELSmatrix_multi(s,ptcl_cell,p,proxyrep,mu,uc)
     end
     % Separate formulation for wall vs ptcl
     A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
-    % A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl_tot,mu); % all particle to wall
-    A12 = srcsum_ptcl_wrapper(@StoDLP,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
-    A21 = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-    % DEBUGGING: All exterior for particle to avoid swapping normals etc.
-    A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
+    A12 = srcsum_ptcl_wrapper(@StoDLP_closeglobal,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP_closeglobal,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    A21 = srcsum(@StoDLP_closepanel,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP_closeglobal,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP_closeglobal,uc.trlist,ptcl_cell,mu);
+    
+    % A12 = srcsum_ptcl_wrapper(@StoDLP,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    % A21 = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    % A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
+    
     A = [A11 A12; A21 A22];
     
     B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve

@@ -1,5 +1,8 @@
 % Panel based discretization on walls.
 
+close = 1;
+expt = 't';
+
 U = []; D = []; % clear structs
 % U.Z = @(t) 2*pi-t + 1j;
 % U.Zp = @(t) -1 + 0.*t;
@@ -11,7 +14,7 @@ U.Z = @(t) (2*pi-t) + 1i*(1+0.3*sin(2*pi-t)); U.Zp = @(t) -1 - 0.3i*cos(2*pi-t);
 D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t); D.Zpp = @(t) - 0.3i*sin(t);
 
 % Panel based quadrature using GL grids, use axigeom functions
-Num_panels = 40;
+Num_panels = 10;
 p = 10; % order on panel
 N_perwall = p * Num_panels; qtype = 'p'; qntype = 'G'; 
 U.p = p; D.p = p;
@@ -40,17 +43,8 @@ UX = @(x) x + 1i*(1+0.3*sin(x));
 DX = @(x) x + 1i*(-1+0.3*sin(x));
 inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0; 
 
-% % Global quadrature -- set up upper and lower walls
-% N = 40;
-% % U.Z = @(t) t + 1i*(1+0.3*sin(t)); U.Zp = @(t) 1 + 0.3i*cos(t); U.Zpp = @(t) -0.3i*sin(t);
-% U = setupquad(U,N);   % t=0 is left end, t=2pi right end
-% U.nx = -U.nx; U.cur = -U.cur; U.xp = -U.xp; U.tang=-U.tang; U.cw=-U.cw; % correct for sense of U, opp from periodicdirpipe
-% % D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t); D.Zpp = @(t) - 0.3i*sin(t);
-% D = setupquad(D,N);   % same dir (left to right); pipe wall normals outwards
-% s = mergesegquads([U,D]);
-
-figure; 
-quiver(real(s.x),imag(s.x),real(s.nx),imag(s.nx)); 
+% figure; 
+% quiver(real(s.x),imag(s.x),real(s.nx),imag(s.nx)); 
 
 % set up left and right walls
 uc.e1 = 2*pi;
@@ -65,12 +59,11 @@ R = L; R.x = L.x+uc.e1; % right side
 uc.L = L; uc.R = R;
 
 % set up aux periodizing basis
+P = [];
 proxyrep = @StoSLP;      % sets proxy pt type via a kernel function call
 Rp = 1.1*2*pi; 
 M = 2*m;    % # proxy pts (2 force comps per pt, so 2M dofs)
 P.x = pi + Rp*exp(2i*pi*(0:M-1)'/M); P = setupquad(P);     % proxy pts
-
-expt = 'd';
 
 mu = 1.0;  % fluid viscosity
 if expt=='t' % Exact soln: either periodic or plus fixed pressure drop / period:
@@ -96,7 +89,6 @@ sig = dens(1:2*numel(s.x));
 psi = dens(1+2*numel(s.x):end);
 fprintf('density norm = %.3g, proxy norm = %.3g\n',norm(sig)/numel(sig), norm(psi)/numel(psi));
 
-close = 1;
 if close
     % Set near targets
     zt.x = [ 1 + 0.9i];
@@ -105,7 +97,6 @@ else
     zt.x = [2+0.2i; 4+0.1i]; 
 end
 [ut, pt] = evalsol(s,P,proxyrep,mu,uc,zt.x,dens,close);
-% ut = evalsol(s,P,proxyrep,mu,uc,zt.x,dens,1); % near eval doesn't implement p yet.
 
 format longE
 % ut
@@ -154,21 +145,26 @@ figure;
 % hold on; 
 magvals = sqrt(u1.^2 + u2.^2);
 imagesc(gx,gy,log10(magvals)); colormap(jet(256)); colorbar; hold on; % Choco jan2026: plot magnitudes to see if no-slip was respected.
-% quiver(gx,gy, u1,u2); title('soln (u,p), with close-eval scheme')
+quiver(gx,gy, u1,u2); 
+if close
+    title('soln (u,p), with close-eval scheme')
+else
+    title('soln (u,p) without close-eval scheme')
+end
 showsegment({U,D}); showsegment({L,R}); plot(zt.x,'go'); 
 % plot(ptcl.x);
 if expt=='t'     % show error vs known...
     i=ceil(ny/2); j=ceil(nx/4); % index interior pt to get pres const
-    % pp = pp - pp(i,j) + peg(i,j);     % shift const in pres to match known
+    pp = pp - pp(i,j) + peg(i,j);     % shift const in pres to match known
     eg2 = sum([u1(:)-ue1(:),u2(:)-ue2(:)].^2,2); % squared ptwise vector L2 errs
     figure; 
-    % subplot(1,2,1); 
+    subplot(1,2,1); 
     imagesc(gx,gy,log10(reshape(eg2,size(xx)))/2);
     axis xy equal tight; caxis([-16 0]); colorbar; hold on; plot(U.x,'k.-');
     plot(D.x,'k.-'); title('peri vel Stokes BVP: log_{10} u err')
-    % subplot(1,2,2); imagesc(gx,gy,log10(abs(pp-reshape(peg,size(xx)))));
-    % axis xy equal tight; caxis([-16 0]); colorbar; hold on;
-    % plot(U.x,'k.-'); plot(D.x,'k.-'); title('log_{10} p err (up to const)');
+    subplot(1,2,2); imagesc(gx,gy,log10(abs(pp-reshape(peg,size(xx)))));
+    axis xy equal tight; caxis([-16 0]); colorbar; hold on;
+    plot(U.x,'k.-'); plot(D.x,'k.-'); title('log_{10} p err (up to const)');
 end
 
 function [E A B C Q] = ELSmatrix(s,p,proxyrep,mu,uc)

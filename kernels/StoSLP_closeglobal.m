@@ -96,7 +96,8 @@ u=[real(u);imag(u)];    % back to real notation, always stack [u1;u2]
 if nargout>1 % -------- want pressure, do its extension by rotating n_y to sigma
   % & since this rotation makes more osc funcs, must resample to fine grid
   % as in the DLP u. (This pressure extension not in [lsc2d].)
-  beta = 1.5;  % >=1: how many times more dense to make fine nodes. Seems enough
+  % beta = 1.5;  % >=1: how many times more dense to make fine nodes. Seems enough
+  beta = 2;
   Nf = ceil(beta*numel(s.x)/2)*2;           % nearest even # fine nodes
   sf.x = perispecinterp(s.x,Nf); sf = setupquad(sf);   % build fine nodes
   %sf = setupquad(s,Nf); % uncomment to elim err due to geom interp if have s.Z

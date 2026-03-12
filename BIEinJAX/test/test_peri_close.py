@@ -1,6 +1,8 @@
 # A test script to solve 2D Stokes periodic channel flow based on 
 # BIE2D: https://github.com/ahbarnett/BIE2D/tree/master
-# Choco Li, Dec 2025
+# ... using panel-based quadrature on wall, with close evaluation implemented (global on particles, panel-based on wall).
+#       panel based eval and close eval based on Hai Zhu's code. [Wu 2020]
+# Choco Li, Mar 2026
 
 from jax import config
 config.update("jax_enable_x64", True)
@@ -20,118 +22,55 @@ sys.path.append(peri_path)
 from periodic.structure_jax import *
 from periodic.periodic_ELS_jax import *
 
-# TODO: avoid doing this if JITing.
 # jax.clear_caches()
 
-
-# _manual() functions for checking kernel functions.
-def StoSLP_manual(tx, sx, sxp, mu):
-    N = sx.size
-    M = tx.size
-
-    sp = jnp.abs(sxp)
-    sw = (2 * jnp.pi / N) * sp
-
-    S = jnp.zeros((M*2,N*2))
-
-    coeff = 1.0/4.0/jnp.pi/mu
-
-    for i in range(N):
-        wt = sw[i]
-        coeff_wt = coeff * wt
-        for j in range(M):
-            xtrg = jnp.real(tx[j])
-            ytrg = jnp.imag(tx[j])
-            xsrc = jnp.real(sx[i])
-            ysrc = jnp.imag(sx[i])
-            r = jnp.array([xtrg-xsrc,ytrg-ysrc])
-            rnorm = jnp.linalg.norm(r)
-            S = S.at[j,i].set(-coeff_wt * jnp.log(rnorm) + coeff_wt * r[0]*r[0]/rnorm/rnorm)
-            S = S.at[j+M,i].set(S[j+M,i] + coeff_wt * r[0]*r[1]/rnorm/rnorm)
-            S = S.at[j,i+N].set(S[j,i+N] + coeff_wt * r[0]*r[1]/rnorm/rnorm)
-            S = S.at[j+M,i+N].set(-coeff_wt * jnp.log(rnorm) + coeff_wt * r[1]*r[1]/rnorm/rnorm)
-            
-    return S
-
-def StoDLP_manual(tx, sx, snx, sxp, mu):
-    N = sx.size
-    M = tx.size
-
-    sp = jnp.abs(sxp)
-    sw = (2 * jnp.pi / N) * sp
-
-    S = jnp.zeros((M*2,N*2))
-
-
-    for i in range(N):
-        wt = sw[i]
-        for j in range(M):
-            xtrg = jnp.real(tx[j])
-            ytrg = jnp.imag(tx[j])
-            xsrc = jnp.real(sx[i])
-            ysrc = jnp.imag(sx[i])
-            xnsrc = jnp.real(snx[i])
-            ynsrc = jnp.imag(snx[i])
-            r = jnp.array([xtrg-xsrc,ytrg-ysrc])
-            rnorm = jnp.linalg.norm(r)
-            rnorm4 = rnorm ** 4
-            rdotn = xnsrc*r[0] + ynsrc*r[1]
-            coeff_wt = rdotn * wt / jnp.pi / mu / rnorm4
-            S = S.at[j,i].set(coeff_wt * r[0]*r[0])
-            S = S.at[j+M,i].set(coeff_wt * r[0] * r[1])
-            S = S.at[j,i+N].set(coeff_wt * r[1] * r[0])
-            S = S.at[j+M,i+N].set(coeff_wt * r[1] * r[1])
-            
-    return S
-
-def StoDLP3_manual(peri_len, lx, sx, snx, sxp, mu):
-    # Sum of p=-1,0,1 copies of sx on lx.
-    A1 = StoDLP_manual(lx, sx, snx, sxp,mu)
-    sx1 = sx - peri_len
-    A2 = StoDLP_manual(lx, sx1, snx, sxp,mu)
-    sx1 = sx + peri_len
-    A3 = StoDLP_manual(lx, sx1, snx, sxp,mu)
-    return A1+A2+A3
-
 # Set discretization parameters
-N_wall = 100
+Np_wall = 10 # number of panels
+p_wall = 10 # GL grid order on each panel
+N_wall = Np_wall * p_wall # total number of discr. points on EACH wall
+N_ptcl = 80 # total number of discr. points on EACH particle (global quadr)
 N_side = 40
-
 N_prx = 2*N_side
-N_ptcl = 80
 peri_len = 2*jnp.pi
 
 # Set up channel walls
-# NOTE: parametrization of wall should be such that when rotating the tangent vector c.c.w by 90 deg, one gets the outward normal vector.
-Z_top = lambda t : peri_len / (2*jnp.pi) * (2*jnp.pi - t) + 1j*(1 + 0.3*jnp.sin(2*jnp.pi - t)) 
+Z_top = lambda t : peri_len / (2*jnp.pi) * (2*jnp.pi - t) + 1j*(1 + 0.3*jnp.sin(2*jnp.pi - t)) # NEW: wrong in rescaling t using peri_len, should rescale x instead. t always [0,2pi]
 Zp_top = lambda t : -peri_len / (2*jnp.pi) - 1j*(0.3*jnp.cos(2*jnp.pi-t))
 Zpp_top = lambda t : -1j*0.3*jnp.sin(2*jnp.pi-t)
 Z_bot = lambda t : peri_len / (2*jnp.pi) * t + 1j*(-1 + 0.3*jnp.sin(t))
 Zp_bot = lambda t : peri_len / (2*jnp.pi) + 1j*(0.3*jnp.cos(t))
 Zpp_bot = lambda t : -1j*0.3*jnp.sin(t)
-# [sx,sxp,snx,scur,sw] = channel_wall_func(Z_top,N_wall,True, Zp_top)
-[sx,sxp,snx,scur,sw] = channel_wall_func(Z_top,N_wall,False, Zp_top,Zpp_top)
-[sx2,sxp2,snx2,scur2,sw2] = channel_wall_func(Z_bot,N_wall,False, Zp_bot,Zpp_bot)
+[sx,sxp,snx,scur,sw,swxp,sxlo,sxhi] = channel_wall_glpanels(Z_top,Np_wall,p_wall,Zp_top,Zpp_top)
+[sx2,sxp2,snx2,scur2,sw2,swxp2,sxlo2,sxhi2] = channel_wall_glpanels(Z_bot,Np_wall,p_wall,Zp_bot,Zpp_bot)
 # Combine top and bottom walls into one Wall object.
 sx = jnp.concatenate([sx,sx2])
 sxp = jnp.concatenate([sxp,sxp2])
 snx = jnp.concatenate([snx,snx2])
 scur = jnp.concatenate([scur,scur2])
 sw = jnp.concatenate([sw,sw2])
+swxp = jnp.concatenate([swxp,swxp2])
+sxlo = jnp.concatenate([sxlo,sxlo2])
+sxhi = jnp.concatenate([sxhi,sxhi2])
 vis(sx, snx, True)
 
 # Add particle 
-num_ptcl = 2 # number of particles on the interior, for self eval.
+num_ptcl = 0 # number of particles on the interior, for self eval.
 if num_ptcl:
     Z_ptcl = lambda t : 1 + 0.3*jnp.cos(t) + 1j*(0.3*jnp.sin(t)+0.25)
     Zp_ptcl = lambda t : - 0.3*jnp.sin(t) + 1j*0.3*jnp.cos(t)
     Zpp_ptcl = lambda t : - 0.3*jnp.cos(t) - 1j*0.3*jnp.sin(t)
-    [ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl) # CHANGED MAR 2026: no flipping normals for close eval, Ematrix changed accordingly.
+    [ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+    ptwxp = 2*jnp.pi/N_ptcl * ptxp
+    ptt = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
+    pta = jnp.array([1+0.25j])
     # Add another particle
     Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.2*jnp.sin(t)+0.)
     Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.2*jnp.cos(t)
     Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.2*jnp.sin(t)
     [ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+    ptwxp2 = 2*jnp.pi/N_ptcl * ptxp2
+    ptt2 = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
+    pta2 = jnp.array([5+0j])
     # Combine particle info, ASSUMES same discr on each ptcl!
     # TODO later: can allow for differences if use vstack and pads. Will need to change ptcl all to all in that case.
     ptx = jnp.concatenate([ptx,ptx2])
@@ -139,6 +78,9 @@ if num_ptcl:
     ptnx = jnp.concatenate([ptnx,ptnx2])
     ptcur = jnp.concatenate([ptcur,ptcur2])
     ptw = jnp.concatenate([ptw,ptw2])
+    ptt = jnp.concatenate([ptt,ptt2])
+    pta = jnp.concatenate([pta,pta2])
+    ptwxp = jnp.concatenate([ptwxp,ptwxp2])
     vis(ptx, ptnx, True)
 else:
     ptx = jnp.array([])
@@ -146,9 +88,12 @@ else:
     ptnx = jnp.array([])
     ptcur = jnp.array([])
     ptw = jnp.array([])
+    ptt = jnp.array([])
+    pta = jnp.array([])
+    ptwxp = jnp.array([])
 
 # Add Stokeslets
-num_stokeslet = 0
+num_stokeslet = 2
 if num_stokeslet:
     x_stokeslet = jnp.array([1+0.2j,4+0.25j])
     xp_stokeslet = jnp.ones((num_stokeslet,)) # Not needed in SLPmat so anything is fine.
@@ -174,15 +119,6 @@ vis(rx, rnx, True)
 R = 1.1 * peri_len
 [px,pxp,pnx,pwt] = proxy(R, peri_len, N_prx)
 vis(px, pnx, True)
-
-# # To verify points and normals look right -- all normals on structures should point out of fluid domain.
-# plt.axis('equal')
-# plt.xlabel('Real part')
-# plt.ylabel('Imag part')
-# plt.title('2D Vector Field Visualization')
-# plt.grid(True)
-# # plt.tight_layout()
-# plt.show()
 
 mu = 0.7
 
@@ -216,7 +152,7 @@ if num_ptcl:
 else:
     vrhs_tot = vrhs
 if num_stokeslet:
-    erhs = jnp.concatenate([vrhs_tot, jnp.zeros((2*N_side,)), Tjump, jnp.array([0]), jnp.array([0])]) 
+    erhs = jnp.concatenate([vrhs_tot, jnp.zeros((2*N_side,)), Tjump, jnp.array([0]), jnp.array([0])]) # Add x- and y- force 0 constraint at the end.
 else:
     erhs = jnp.concatenate([vrhs_tot, jnp.zeros((2*N_side,)), Tjump])
 
@@ -235,13 +171,14 @@ print(f'norm of wall density = {wall_dens_norm:.3g}, norm of ptcl density = {ptc
 
 # Evaluate at target
 if num_ptcl:
-    [ut, pt] = evalsol_ptcl(tx, tnx, sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_ptcl_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
 elif num_stokeslet:
-    [ut, pt] = evalsol_stokeslet(tx, tnx, sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_stokeslet_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
 else:
-    [ut, pt] = evalsol2(tx, tnx, sx, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol2_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
 
 err = jnp.linalg.norm(ut - ue(tx)) # short form check -- matrix norm for velocity error, abs val for pressure
+print(pt)
 perr = jnp.abs(pt - pe(tx))
 # print(perr.shape)
 print(f'u velocity err at zt = {err:.3g}\n')
@@ -278,11 +215,11 @@ print(f'norm of wall density = {wall_dens_norm:.3g}, norm of ptcl density = {ptc
 
 # Evaluate at target
 if num_ptcl:
-    [ut, pt] = evalsol_ptcl(tx, tnx, sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_ptcl_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
 elif num_stokeslet:
-    [ut, pt] = evalsol_stokeslet(tx, tnx, sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_stokeslet_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
 else:
-    [ut, pt] = evalsol2(tx, tnx, sx, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol2_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
 
 print('u velocity at zt = {:.12g}, {:.12g}, p at first trg = {:.12g}, at second = {:.12g}'.format(ut[0], ut[1], pt[0], pt[1]))
 
@@ -316,7 +253,7 @@ def plot_streamlines_total_with_multi_holes(edens, x0_list, f_list,
     tx_jax = jnp.array(tx_inside)
     tnx_jax = jnp.ones_like(tx_jax) + 0j
 
-    u_tot, _ = evalsol_stokeslet(tx_jax, tnx_jax, sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
+    u_tot, _ = evalsol_stokeslet_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
 
     M = tx_inside.size
     ux = u_tot[:M]
@@ -354,6 +291,7 @@ def plot_streamlines_total_with_multi_holes(edens, x0_list, f_list,
     plt.ylabel("y")
     plt.show()
 
+
 def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, density=1.3, buffer_factor=1.0):
     xg = np.linspace(0.0, peri_len, nxg)
     yg = np.linspace(-1.0-ypad, 1.0+ypad, ng)
@@ -365,6 +303,7 @@ def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, den
 
     Xj = jnp.array(xg)
     YT = np.array(jnp.imag(Z_top(2*jnp.pi-Xj))) # TODO: hardcoded t->2pi-t flip for now.
+    # YT = np.array(jnp.imag(Z_top(Xj)))
     YB = np.array(jnp.imag(Z_bot(Xj)))
 
     inside = (Y >= (YB[None, :] + delta)) & (Y <= (YT[None, :] - delta))
@@ -383,9 +322,9 @@ def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, den
     tnx_jax = jnp.ones_like(tx_jax) + 0j
 
     if len(Xc_list) > 0:
-        u_tot, _ = evalsol_ptcl(tx_jax, tnx_jax, sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, px, pxp, pwt, peri_len, mu, edens)
+        u_tot, _ = evalsol_ptcl_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
     else:
-        u_tot, _ = evalsol2(tx_jax, tnx_jax, sx, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
+        u_tot, _ = evalsol2_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
 
     M = tx_inside.size
     ux = u_tot[:M]
@@ -411,7 +350,7 @@ def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, den
     plt.xlim(0, peri_len)
     plt.ylim(-1.0-ypad, 1.0+ypad)
     plt.colorbar(label="|u|")
-    plt.title("Flow visualization, no close evaluation")
+    plt.title("Flow visualization, with close evaluation")
     plt.xlabel("x")
     plt.ylabel("y")
     plt.show()
