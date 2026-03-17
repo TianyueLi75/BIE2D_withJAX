@@ -39,8 +39,8 @@ def get_vslip(B1, B2, ptcl_coords_2d):
 Np_wall = 10 # number of panels
 p_wall = 10 # GL grid order on each panel
 N_wall = Np_wall * p_wall # total number of discr. points on EACH wall
-N_ptcl = 40 # total number of discr. points on EACH particle (global quadr)
-N_side = 20
+N_ptcl = 80 # total number of discr. points on EACH particle (global quadr)
+N_side = 40
 N_prx = 2*N_side
 peri_len = 2*jnp.pi
 
@@ -69,7 +69,7 @@ num_ptcl = 2 # number of particles on the interior, for self eval.
 Z_ptcl = lambda t : 1 + 0.3*jnp.cos(t) + 1j*(0.3*jnp.sin(t)+0.25)
 Zp_ptcl = lambda t : - 0.3*jnp.sin(t) + 1j*0.3*jnp.cos(t)
 Zpp_ptcl = lambda t : - 0.3*jnp.cos(t) - 1j*0.3*jnp.sin(t)
-[ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+[ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
 ptwxp = 2*jnp.pi/N_ptcl * ptxp
 ptt = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
 pta = jnp.array([1+0.25j])
@@ -77,7 +77,7 @@ pta = jnp.array([1+0.25j])
 Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.2*jnp.sin(t)+0.)
 Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.2*jnp.cos(t)
 Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.2*jnp.sin(t)
-[ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+[ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
 ptwxp2 = 2*jnp.pi/N_ptcl * ptxp2
 ptt2 = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
 pta2 = jnp.array([5+0j])
@@ -112,7 +112,7 @@ mu = 0.7
 
 # Make ELS matrix
 # TODO: debug ELS matrix
-[E,bc_gamma_mat,B,intF,intT,C,Q] = ELSmatrix_rbm(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu)
+[E,bc_gamma_mat,B,intF,intT,C,Q] = ELSmatrix_rbm(sx, snx, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pwt, lx, lnx, rx, rnx, peri_len, mu)
 
 tx = jnp.array([2+0.2j,4+0.1j])
 tnx = jnp.array([1+0j,1+0j])
@@ -144,7 +144,7 @@ print(f'norm of wall density = {wall_dens_norm:.3g}, norm of ptcl density = {ptc
 print(f"Mobility problem for B1={B1},B2={B2}, is U1 = [{U[0]:.3g},{U[1]:.3g}], U2 = [{U[2]:.3g},{U[3]:.3g}], Omega1 = {Omega[0]:.3g}, Omega2 = {Omega[1]:.3g}")
 
 # Evaluate at target
-[ut, pt] = evalsol_rbm(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
+[ut, pt] = evalsol_rbm(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptw, ptwxp, px, pwt, peri_len, mu, edens)
 print('u velocity at zt = {:.12g}, {:.12g}, p at first trg = {:.12g}, at second = {:.12g}'.format(ut[0], ut[1], pt[0], pt[1]))
 
 def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, density=1.3, buffer_factor=1.0):
@@ -176,7 +176,7 @@ def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, den
     tx_jax = jnp.array(tx_inside)
     tnx_jax = jnp.ones_like(tx_jax) + 0j
 
-    u_tot, _ = evalsol_rbm(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
+    u_tot, _ = evalsol_rbm(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptw, ptwxp, px, pwt, peri_len, mu, edens)
 
     M = tx_inside.size
     ux = u_tot[:M]

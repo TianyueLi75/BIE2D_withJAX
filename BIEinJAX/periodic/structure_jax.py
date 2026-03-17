@@ -126,7 +126,7 @@ def gauss(N: int):
 # Initialize a channel wall (combining init and setup steps)
 # when function and number of discretization points are given
 # -------------------------
-def channel_wall_func(Z,N,normal_orient,*args):
+def channel_wall_func(Z,N,*args):
     t = jnp.linspace(0, 2 * jnp.pi, N, endpoint=False)
     x = Z(t)
     if args is not None:
@@ -141,9 +141,6 @@ def channel_wall_func(Z,N,normal_orient,*args):
         xpp = perispecdiff(xp)
     sp = jnp.abs(xp)
     nx = -1j*(xp / sp)
-    if normal_orient:
-        nx = -nx
-        xp = -xp
     cur = -jnp.real(jnp.conj(xpp) * nx) / (sp**2)
     sw = (2 * jnp.pi / N) * sp
     return x,xp,nx,cur,sw
@@ -152,14 +149,12 @@ def channel_wall_func(Z,N,normal_orient,*args):
 # Initialize a channel wall (combining init and setup steps)
 # when discretization nodes are given
 # -------------------------
-def channel_wall_x(x_, normal_orient):
+def channel_wall_x(x_):
     x = x_.flatten()
     xp = perispecdiff(x)
     xpp = perispecdiff(xp)
     sp = jnp.abs(xp)
     nx = -1j*(xp / sp)
-    if normal_orient:
-        nx = -1*nx
     cur = -jnp.real(jnp.conj(xpp) * nx) / (sp**2)
     sw = (2 * jnp.pi / x.size) * sp
     return x,xp,nx,cur,sw
@@ -258,13 +253,13 @@ def vis(x_, nx_, hold: bool  = False):
 # Example usage / self-test for setup quad.
 # ------------------------------
 if __name__ == "__main__":
-    Z_top = lambda t : t + 1j*(3 + 0.3*jnp.sin(t))
-    Zp_top = lambda t : 1 + 1j*(0.3*jnp.cos(t))
+    Z_top = lambda t : 2*jnp.pi-t + 1j*(3 + 0.3*jnp.sin(2*jnp.pi-t))
+    Zp_top = lambda t : -1 - 1j*(0.3*jnp.cos(2*jnp.pi-t))
+    Zpp_top = lambda t : - 1j*(0.3*jnp.sin(2*jnp.pi-t))
     Z_bot = lambda t : t + 1j*(0.3*jnp.sin(t))
+    Zp_bot = lambda t : 1 + 1j*(0.3*jnp.cos(t))
+    Zpp_bot = lambda t : - 1j*(0.3*jnp.sin(t))
     
-    # Z = lambda s: (1 + 0.3 * jnp.cos(5 * s)) * jnp.exp(1j * s)
-    # Zp = lambda s: (-1.5 * jnp.sin(5 * s) + 1j * (1 + 0.3 * jnp.cos(5 * s))) * jnp.exp(1j * s)
-
     plt.figure(figsize=(7, 6))
 
     N_wall = 10
@@ -272,11 +267,11 @@ if __name__ == "__main__":
     N_prx = 5
 
     print("Channel, top")
-    [x,xp,nx,cur] = channel_wall_func(Z_top,N_wall,True, Zp_top)
+    [x,xp,nx,cur,sw] = channel_wall_func(Z_top,N_wall,Zp_top,Zpp_top)
     vis(x,nx,True)
 
     print("Channel, bottom")
-    [x,xp,nx,cur] = channel_wall_func(Z_bot,N_wall,False, Zp_top)
+    [x,xp,nx,cur,sw] = channel_wall_func(Z_bot,N_wall,Zp_bot,Zpp_bot)
     vis(x,nx,True)
 
     print("Side, left")
@@ -290,7 +285,7 @@ if __name__ == "__main__":
     print("Particle, circle")
     Z = lambda t : 0.5 + 0.3*jnp.cos(t) + 1j*(0.3*jnp.sin(t)+1)
     Zp = lambda t : - 0.1*jnp.sin(t) + 1j*0.1*jnp.cos(t)
-    [x,xp,nx,cur] = channel_wall_func(Z,N_wall,False, Zp)
+    [x,xp,nx,cur,sw] = channel_wall_func(Z,N_wall,Zp)
     vis(x,nx,True)
 
     print("Proxy")

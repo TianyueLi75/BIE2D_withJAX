@@ -54,12 +54,12 @@ sxhi = jnp.concatenate([sxhi,sxhi2])
 vis(sx, snx, True)
 
 # Add particle 
-num_ptcl = 0 # number of particles on the interior, for self eval.
+num_ptcl = 2 # number of particles on the interior, for self eval.
 if num_ptcl:
     Z_ptcl = lambda t : 1 + 0.3*jnp.cos(t) + 1j*(0.3*jnp.sin(t)+0.25)
     Zp_ptcl = lambda t : - 0.3*jnp.sin(t) + 1j*0.3*jnp.cos(t)
     Zpp_ptcl = lambda t : - 0.3*jnp.cos(t) - 1j*0.3*jnp.sin(t)
-    [ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+    [ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
     ptwxp = 2*jnp.pi/N_ptcl * ptxp
     ptt = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
     pta = jnp.array([1+0.25j])
@@ -67,7 +67,7 @@ if num_ptcl:
     Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.2*jnp.sin(t)+0.)
     Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.2*jnp.cos(t)
     Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.2*jnp.sin(t)
-    [ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+    [ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
     ptwxp2 = 2*jnp.pi/N_ptcl * ptxp2
     ptt2 = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
     pta2 = jnp.array([5+0j])
@@ -93,7 +93,7 @@ else:
     ptwxp = jnp.array([])
 
 # Add Stokeslets
-num_stokeslet = 2
+num_stokeslet = 0
 if num_stokeslet:
     x_stokeslet = jnp.array([1+0.2j,4+0.25j])
     xp_stokeslet = jnp.ones((num_stokeslet,)) # Not needed in SLPmat so anything is fine.
@@ -125,12 +125,11 @@ mu = 0.7
 # Make ELS matrix
 # TODO later: if we want a combination of these cases, we may need to make a new ELSmatrix function.
 if num_ptcl:
-    [E,A,B,C,Q] = ELSmatrix_ptcl(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu)
+    [E,A,B,C,Q] = ELSmatrix_ptcl(sx, snx, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pwt, lx, lnx, rx, rnx, peri_len, mu)
 elif num_stokeslet: 
-    # [E,A,B,C,Q] = ELSmatrix_stokeslet(sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu)
-    [E,A,B,C,Q] = ELSmatrix_stokeslet_f0(sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu)
+    [E,A,B,C,Q] = ELSmatrix_stokeslet_f0(sx, snx, scur, sw, x_stokeslet, w_stokeslet, px, pwt, lx, lnx, rx, rnx, peri_len, mu)
 else:
-    [E,A,B,C,Q] = ELSmatrix(sx, snx, sxp, scur, sw, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu)
+    [E,A,B,C,Q] = ELSmatrix(sx, snx, scur, sw, px, pwt, lx, lnx, rx, rnx, peri_len, mu)
 
 tx = jnp.array([2+0.2j,4+0.1j])
 tnx = jnp.array([1+0j,1+0j])
@@ -171,11 +170,11 @@ print(f'norm of wall density = {wall_dens_norm:.3g}, norm of ptcl density = {ptc
 
 # Evaluate at target
 if num_ptcl:
-    [ut, pt] = evalsol_ptcl_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_ptcl(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptw, ptwxp, px, pwt, peri_len, mu, edens)
 elif num_stokeslet:
-    [ut, pt] = evalsol_stokeslet_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_stokeslet(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, w_stokeslet, px, pwt, peri_len, mu, edens)
 else:
-    [ut, pt] = evalsol2_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pwt, peri_len, mu, edens)
 
 err = jnp.linalg.norm(ut - ue(tx)) # short form check -- matrix norm for velocity error, abs val for pressure
 print(pt)
@@ -215,11 +214,11 @@ print(f'norm of wall density = {wall_dens_norm:.3g}, norm of ptcl density = {ptc
 
 # Evaluate at target
 if num_ptcl:
-    [ut, pt] = evalsol_ptcl_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_ptcl(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptw, ptwxp, px, pwt, peri_len, mu, edens)
 elif num_stokeslet:
-    [ut, pt] = evalsol_stokeslet_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_stokeslet(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, w_stokeslet, px, pwt, peri_len, mu, edens)
 else:
-    [ut, pt] = evalsol2_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
+    [ut, pt] = evalsol_panel(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pwt, peri_len, mu, edens)
 
 print('u velocity at zt = {:.12g}, {:.12g}, p at first trg = {:.12g}, at second = {:.12g}'.format(ut[0], ut[1], pt[0], pt[1]))
 
@@ -253,7 +252,7 @@ def plot_streamlines_total_with_multi_holes(edens, x0_list, f_list,
     tx_jax = jnp.array(tx_inside)
     tnx_jax = jnp.ones_like(tx_jax) + 0j
 
-    u_tot, _ = evalsol_stokeslet_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, peri_len, mu, edens)
+    u_tot, _ = evalsol_stokeslet(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, x_stokeslet, w_stokeslet, px, pwt, peri_len, mu, edens)
 
     M = tx_inside.size
     ux = u_tot[:M]
@@ -322,9 +321,9 @@ def plot_streamlines_total(edens, Xc_list, r_list, nxg=140, ng=70, ypad=0.5, den
     tnx_jax = jnp.ones_like(tx_jax) + 0j
 
     if len(Xc_list) > 0:
-        u_tot, _ = evalsol_ptcl_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens)
+        u_tot, _ = evalsol_ptcl(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptw, ptwxp, px, pwt, peri_len, mu, edens)
     else:
-        u_tot, _ = evalsol2_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pxp, pwt, peri_len, mu, edens)
+        u_tot, _ = evalsol_panel(tx_jax, tnx_jax, sx, sxlo, sxhi, snx, sxp, scur, sw, px, pwt, peri_len, mu, edens)
 
     M = tx_inside.size
     ux = u_tot[:M]

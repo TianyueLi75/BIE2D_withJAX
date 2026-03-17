@@ -1,6 +1,7 @@
 # A test script to solve 2D Stokes periodic channel flow based on 
 # BIE2D: https://github.com/ahbarnett/BIE2D/tree/master
 # Choco Li, Dec 2025
+# March 2026: DEPRECATED, function files no longer support non-panel based wall quadrature or non-near evaluation.
 
 from jax import config
 config.update("jax_enable_x64", True)

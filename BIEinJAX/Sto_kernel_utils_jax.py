@@ -1,6 +1,4 @@
 """
-stokes_layers.py
-================
 JAX-based implementation of 2D Stokes single-layer (SLP)
 and double-layer (DLP) boundary integral operators.
 
@@ -40,101 +38,32 @@ from periodic.structure_jax import channel_wall_func, channel_wall_glpanels
 # --- Laplace Single-Layer Potential -----------------------------------
 # ======================================================================
 @jit
-def LapSLP(tx, sx, sp, sw, dens):
-    results = LapSLPmat(tx, sx, sp, sw)
+def LapSLP(tx, sx, sw, dens):
+    A = LapSLPmat(tx, sx, sw)
 
     # if no density -> return operator matrices
     if dens is None or dens.size == 0:
-        return results
-
-    # if density given -> apply matrices
-    if len(results) == 2:
-        A, An = results
-        return A @ dens, An @ dens
-    elif len(results) == 5:
-        A, An, A11, A12, A22 = results
-        u = A @ dens
-        un = An @ dens
-        uxx = A11 @ dens
-        uxy = A12 @ dens
-        uyy = A22 @ dens
-        return u, un, uxx, uxy, uyy
+        return A
     else:
-        (A,) = results
-        return A @ dens,
+        return A @ dens
 
 @jit
-def LapSLPmat(tx, sx, sp, sw, *args):
-    self_eval = False
-    N = sx.size
-    M = tx.size
-
+def LapSLPmat(tx, sx, sw):
     # displacement matrix
     d = tx[:, None] - sx[None, :]
-    r1, r2 = jnp.real(d), jnp.imag(d)
     absd = jnp.abs(d)
-
-    # --- base potential kernel matrix ---
-    if self_eval:
-        # crude diagonal limit for self-case
-        # (Kress quadrature approximation skipped for simplicity)
-        log_abs = jnp.log(absd + 1e-15)
-        diag_term = -jnp.log(sp + 1e-15)
-        A = -log_abs / (2 * jnp.pi)
-        idx = jnp.arange(N)
-        A = A.at[idx, idx].set(diag_term / (2 * jnp.pi))
-        A *= sw
-    else:
-        A = (-1 / (2 * jnp.pi)) * jnp.log(absd + 1e-15) * sw
-
-    results = [A]
-
-    # --- target normal derivative kernel (dipole form) ---
-    # TODO: whether cur can be computed here
-    if len(args)>0 :
-        tnx = args[0]
-        An = (1 / (2 * jnp.pi)) * jnp.real((-tnx[:, None]) / d)
-        if len(args) > 1:
-            cur = args[1]
-            idx = jnp.arange(N)
-            An = An.at[idx, idx].set(-cur / (4 * jnp.pi))
-        An *= sw
-        results.append(An)
-
-    # --- 2nd derivatives (optional) ---
-    A11 = (1 / (2 * jnp.pi)) * (r1**2 - r2**2) / (absd**4 + 1e-15)
-    A12 = (1 / (2 * jnp.pi)) * (2 * r1 * r2) / (absd**4 + 1e-15)
-    A22 = (1 / (2 * jnp.pi)) * (r2**2 - r1**2) / (absd**4 + 1e-15)
-    A11 *= sw
-    A12 *= sw
-    A22 *= sw
-    results += [A11, A12, A22]
-
-    return tuple(results)
+    A = (-1 / (2 * jnp.pi)) * jnp.log(absd + 1e-15) * sw
+    return A
 
 @jit
-def LapSLP_self(tx, sx, sp, sw, dens):
-    results = LapSLPmat_self(tx, sx, sp, sw)
+def LapSLP_self(tx, sx, sp, dens):
+    A = LapSLPmat_self(tx, sx, sp)
 
     # if no density -> return operator matrices
     if dens is None or dens.size == 0:
-        return results
-
-    # if density given -> apply matrices
-    if len(results) == 2:
-        A, An = results
-        return A @ dens, An @ dens
-    elif len(results) == 5:
-        A, An, A11, A12, A22 = results
-        u = A @ dens
-        un = An @ dens
-        uxx = A11 @ dens
-        uxy = A12 @ dens
-        uyy = A22 @ dens
-        return u, un, uxx, uxy, uyy
+        return A
     else:
-        (A,) = results
-        return A @ dens,
+        return A @ dens
 
 @jit
 # Helper function with toeplitz for fft in LapSLP self.
@@ -142,92 +71,36 @@ def circulant(X):
     X = X.reshape(-1) # X = X(:)
     N = X.shape[0]
     col = jnp.concatenate((X[:1], X[:0:-1]))
-
-    # # jax.debug.print("X= {}", X)
-    # # jax.debug.print("col= {}", col)
     
     i = jnp.arange(N)[:, None]
     j = jnp.arange(N)[None, :]
     A = col[(i - j) % N]
-    # # jax.debug.print("A= {}", A)
 
     return A
 
 @jit
-def LapSLPmat_self(tx, sx, sp, sw, *args):
-    self_eval = True
+def LapSLPmat_self(tx, sx, sp):
     N = sx.size
-    M = tx.size
 
-    # displacement matrix
     d = tx[:, None] - sx[None, :]
-    r1, r2 = jnp.real(d), jnp.imag(d)
     absd = jnp.abs(d)
-
-    # # jax.debug.print("sp = {}", sp)
-
-    # --- base potential kernel matrix ---
-    if self_eval:
-
-        # Find diagonal limit using Kress rule
-
-        A = -jnp.log(absd) + circulant(0.5*jnp.log(4*jnp.sin(jnp.pi*(jnp.arange(N)/N))**2))
-        # # jax.debug.print("A = -log = {}", A)
-
-        idx = jnp.arange(N)
-        A = A.at[idx, idx].set(-jnp.log(sp))
-
-        # # jax.debug.print("A sub diag terms = {}", A)
-
-        m = jnp.arange(N/2-1)+1
-        # # jax.debug.print("m = {}", m)
-
-        Rjn = jnp.fft.ifft(jnp.concatenate([
-            jnp.array([0.]),
-            1. / m,
-            jnp.array([2./N]),
-            1./m[::-1]
-        ])) / 2.
-
-        # # jax.debug.print("Rjn = {}", Rjn)
-
-        A /= N
-        A += circulant(Rjn)
-
-        # # jax.debug.print("A added Rjn = {}", A)
-
-        A *= sp
-
-        # # jax.debug.print("A *sp = {}", A)
-
-    else:
-        A = (-1 / (2 * jnp.pi)) * jnp.log(absd + 1e-15) * sw
-
+    
+    A = -jnp.log(absd) + circulant(0.5*jnp.log(4*jnp.sin(jnp.pi*(jnp.arange(N)/N))**2))
+    idx = jnp.arange(N)
+    A = A.at[idx, idx].set(-jnp.log(sp))
+    m = jnp.arange(N/2-1)+1
+    Rjn = jnp.fft.ifft(jnp.concatenate([
+        jnp.array([0.]),
+        1. / m,
+        jnp.array([2./N]),
+        1./m[::-1]
+    ])) / 2.
+    A /= N
+    A += circulant(Rjn)
+    A *= sp
     A = jnp.real(A) # to avoid numerical instability causing complex log values when N large.
 
-    results = [A]
-
-    # --- target normal derivative kernel (dipole form) ---
-    if len(args) > 0: # tnx and scur are included in input
-        tnx = args[0]
-        An = (1 / (2 * jnp.pi)) * jnp.real((-tnx[:, None]) / d)
-        if len(args) > 1:
-            cur = args[1]
-            idx = jnp.arange(N)
-            An = An.at[idx, idx].set(-cur / (4 * jnp.pi))
-        An *= sw
-        results.append(An)
-
-    # --- 2nd derivatives (optional) ---
-    A11 = (1 / (2 * jnp.pi)) * (r1**2 - r2**2) / (absd**4 + 1e-15)
-    A12 = (1 / (2 * jnp.pi)) * (2 * r1 * r2) / (absd**4 + 1e-15)
-    A22 = (1 / (2 * jnp.pi)) * (r2**2 - r1**2) / (absd**4 + 1e-15)
-    A11 *= sw
-    A12 *= sw
-    A22 *= sw
-    results += [A11, A12, A22]
-
-    return tuple(results)
+    return A
 
 
 # ----------------------------------------------------------------------
@@ -235,12 +108,12 @@ def LapSLPmat_self(tx, sx, sp, sw, *args):
 # ----------------------------------------------------------------------
 
 @jit
-def StoSLP(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
+def StoSLP(tx, tnx, sx, sw, mu, dens):
 
     if dens is None:
         dens = jnp.array([])
 
-    u, p, T = StoSLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu)
+    u, p, T = StoSLPmat(tx, tnx, sx, sw, mu)
     if dens.size > 0:
         u = u @ dens
         p = p @ dens
@@ -248,50 +121,25 @@ def StoSLP(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
     return u, p, T
 
 @jit
-def StoSLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu):
-    # jax.debug.print("\n in SLPmat far eval", ordered=True)
-    self_eval = False
-    N = sx.size
-    M = tx.size
-
+def StoSLPmat(tx, tnx, sx, sw, mu):
     r = tx[:, None] - sx[None, :]
-    # # jax.debug.print("{r}",r=r)
     irr = 1.0 / (jnp.conj(r) * r)
     d1, d2 = jnp.real(r), jnp.imag(r)
     c = 1.0 / (4.0 * jnp.pi * mu)
     irr = jnp.real(irr)
 
-    # Compute some geometric properties on the fly
-    sp = jnp.abs(sxp)
-    stang = sxp/sp
-
-    # --- Velocity matrix ---
-    if self_eval:
-        [S,_,_,_] = LapSLP_self(sx, sx, sp, sw, jnp.array([]))
-        A = jnp.kron(jnp.eye(2) / (2 * mu), S)
-        t1, t2 = jnp.real(stang), jnp.imag(stang)
-        A11 = d1**2 * irr
-        A12 = d1 * d2 * irr
-        A22 = d2**2 * irr
-        idx = jnp.arange(N)
-        A11 = A11.at[idx, idx].set(t1**2)
-        A12 = A12.at[idx, idx].set(t1 * t2)
-        A22 = A22.at[idx, idx].set(t2**2)
-        A += c * jnp.block([[A11, A12], [A12, A22]]) * jnp.concatenate([sw, sw])
-    else:
-        logir = -jnp.log(jnp.abs(r))
-        A12 = d1 * d2 * irr
-        A = c * jnp.block([
-            [logir + d1**2 * irr, A12],
-            [A12, logir + d2**2 * irr]
-        ]) * jnp.concatenate([sw, sw])
+    logir = -jnp.log(jnp.abs(r))
+    A12 = d1 * d2 * irr
+    A = c * jnp.block([
+        [logir + d1**2 * irr, A12],
+        [A12, logir + d2**2 * irr]
+    ]) * jnp.concatenate([sw, sw])
 
     # --- Pressure matrix ---
     P = jnp.block([d1 * irr, d2 * irr])
     P *= (1.0 / (2 * jnp.pi)) * jnp.concatenate([sw, sw])
 
     # --- Traction matrix ---
-    # rdotn = d1[:, None] * jnp.real(tnx) + d2[:, None] * jnp.imag(tnx)
     rdotn = d1 * jnp.real(tnx)[:, None] + d2 * jnp.imag(tnx)[:, None] 
     rdotnir4 = rdotn * irr * irr
     A12 = (-1.0 / jnp.pi) * d1 * d2 * rdotnir4
@@ -299,28 +147,18 @@ def StoSLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu):
         [(-1.0 / jnp.pi) * d1**2 * rdotnir4, A12],
         [A12, (-1.0 / jnp.pi) * d2**2 * rdotnir4]
     ])
-
-    if self_eval:
-        cdiag = -scur / (2 * jnp.pi)
-        tx = 1j * snx
-        t1, t2 = jnp.real(tx), jnp.imag(tx)
-        idx = jnp.arange(N)
-        T = T.at[idx, idx].set(cdiag * t1**2)
-        T = T.at[idx + N, idx].set(cdiag * t1 * t2)
-        T = T.at[idx, idx + N].set(cdiag * t1 * t2)
-        T = T.at[idx + N, idx + N].set(cdiag * t2**2)
     T *= jnp.concatenate([sw, sw])
 
     return A, P, T
 
 
 @jit
-def StoSLP_self(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
+def StoSLP_self(sx, snx, sxp, scur, sw, mu, dens):
 
     if dens is None:
         dens = jnp.array([])
 
-    u, p, T = StoSLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu)
+    u, p, T = StoSLPmat_self(sx, snx, sxp, scur, sw, mu)
     if dens.size > 0:
         u = u @ dens
         p = p @ dens
@@ -328,11 +166,10 @@ def StoSLP_self(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
     return u, p, T
 
 @jit
-def StoSLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
-    # jax.debug.print("\n in SLPmat selfeval", ordered=True)
-    self_eval = True
+def StoSLPmat_self(sx, snx, sxp, scur, sw, mu):
     N = sx.size
-    M = tx.size
+    tx = sx
+    tnx = snx
 
     r = tx[:, None] - sx[None, :]
     irr = 1.0 / (jnp.conj(r) * r)
@@ -344,43 +181,25 @@ def StoSLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
     sp = jnp.abs(sxp)
     stang = sxp/sp
 
-    # --- Velocity matrix ---
-    if self_eval:
-        [S,_,_,_] = LapSLP_self(sx, sx, sp, sw, jnp.array([]))
+    S = LapSLP_self(sx, sx, sp, jnp.array([]))
         
-        # print("======= DEBUG: Check LapSLP self ========= ")
-        # # jax.debug.print("S = {}", S)
+    A = jnp.kron(jnp.eye(2) / (2 * mu), S)
+    t1, t2 = jnp.real(stang), jnp.imag(stang)
+    A11 = d1**2 * irr
+    A12 = d1 * d2 * irr
+    A22 = d2**2 * irr
+    idx = jnp.arange(N)
+    A11 = A11.at[idx, idx].set(t1**2)
+    A12 = A12.at[idx, idx].set(t1 * t2)
+    A22 = A22.at[idx, idx].set(t2**2)
 
-        A = jnp.kron(jnp.eye(2) / (2 * mu), S)
-        t1, t2 = jnp.real(stang), jnp.imag(stang)
-        A11 = d1**2 * irr
-        A12 = d1 * d2 * irr
-        A22 = d2**2 * irr
-        idx = jnp.arange(N)
-        A11 = A11.at[idx, idx].set(t1**2)
-        A12 = A12.at[idx, idx].set(t1 * t2)
-        A22 = A22.at[idx, idx].set(t2**2)
+    A += c * jnp.block([[A11, A12], [A12, A22]]) * jnp.concatenate([sw, sw])
 
-        # print("S shape: ",S.shape, ", A shape: ", A.shape,", A11 shape: ", A11.shape, ", sw shape: ", sw.shape)
-        A += c * jnp.block([[A11, A12], [A12, A22]]) * jnp.concatenate([sw, sw])
-
-    else:
-        logir = -jnp.log(jnp.abs(r))
-        A12 = d1 * d2 * irr
-        A = c * jnp.block([
-            [logir + d1**2 * irr, A12],
-            [A12, logir + d2**2 * irr]
-        ]) * jnp.concatenate([sw, sw])
-
-    # TODO: Check P and T self, also might need to check for DL self...
-    # TODO: turn into unit tests to compare with premade matlab files.
-    
     # --- Pressure matrix ---
     P = jnp.block([d1 * irr, d2 * irr])
     P *= (1.0 / (2 * jnp.pi)) * jnp.concatenate([sw, sw])
 
     # --- Traction matrix ---
-    # rdotn = d1[:, None] * jnp.real(tnx) + d2[:, None] * jnp.imag(tnx)
     rdotn = d1 * jnp.real(tnx)[:, None] + d2 * jnp.imag(tnx)[:, None] 
     rdotnir4 = rdotn * irr * irr
     A12 = (-1.0 / jnp.pi) * d1 * d2 * rdotnir4
@@ -389,15 +208,14 @@ def StoSLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
         [A12, (-1.0 / jnp.pi) * d2**2 * rdotnir4]
     ])
 
-    if self_eval:
-        cdiag = -scur / (2 * jnp.pi)
-        tx = 1j * snx
-        t1, t2 = jnp.real(tx), jnp.imag(tx)
-        idx = jnp.arange(N)
-        T = T.at[idx, idx].set(cdiag * t1**2)
-        T = T.at[idx + N, idx].set(cdiag * t1 * t2)
-        T = T.at[idx, idx + N].set(cdiag * t1 * t2)
-        T = T.at[idx + N, idx + N].set(cdiag * t2**2)
+    cdiag = -scur / (2 * jnp.pi)
+    tx = 1j * snx
+    t1, t2 = jnp.real(tx), jnp.imag(tx)
+    idx = jnp.arange(N)
+    T = T.at[idx, idx].set(cdiag * t1**2)
+    T = T.at[idx + N, idx].set(cdiag * t1 * t2)
+    T = T.at[idx, idx + N].set(cdiag * t1 * t2)
+    T = T.at[idx + N, idx + N].set(cdiag * t2**2)
     T *= jnp.concatenate([sw, sw])
 
     return A, P, T
@@ -407,12 +225,12 @@ def StoSLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
 # --- Stokes Double-Layer Potential (DLP) -------------------------------
 # ----------------------------------------------------------------------
 @jit
-def StoDLP(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
+def StoDLP(tx, tnx, sx, snx, sw, mu, dens):
     """Evaluate 2D Stokes double-layer velocity, pressure, and traction."""
     if dens is None:
         dens = jnp.array([])
 
-    u, p, T = StoDLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu)
+    u, p, T = StoDLPmat(tx, tnx, sx, snx, sw, mu)
     if dens.size > 0:
         u = u @ dens
         p = p @ dens
@@ -420,13 +238,8 @@ def StoDLP(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
     return u, p, T
 
 @jit
-def StoDLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu):
-    # jax.debug.print("\n in DLPmat Far eval", ordered=True)
-    self_eval = False
+def StoDLPmat(tx, tnx, sx, snx, sw, mu):
     """Build dense matrices for double-layer velocity, pressure, and traction."""
-    N = sx.size
-    M = tx.size
-
     r = tx[:, None] - sx[None, :]
     irr = 1.0 / (jnp.conj(r) * r)
     d1, d2 = jnp.real(r), jnp.imag(r)
@@ -440,17 +253,7 @@ def StoDLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu):
     A = jnp.block([
         [(1.0 / jnp.pi) * d1**2 * rdotnir4, A12],
         [A12, (1.0 / jnp.pi) * d2**2 * rdotnir4]
-    ])
-    if self_eval:
-        cdiag = -scur / (2 * jnp.pi)
-        tx = 1j * snx
-        t1, t2 = jnp.real(tx), jnp.imag(tx)
-        idx = jnp.arange(N)
-        A = A.at[idx, idx].set(cdiag * t1**2)
-        A = A.at[idx + N, idx].set(cdiag * t1 * t2)
-        A = A.at[idx, idx + N].set(cdiag * t1 * t2)
-        A = A.at[idx + N, idx + N].set(cdiag * t2**2)
-        
+    ]) 
     A *= jnp.concatenate([sw, sw])
 
     # --- Pressure matrix ---
@@ -497,12 +300,12 @@ def StoDLPmat(tx, tnx, sx, snx, sxp, scur, sw, mu):
     return A, P, T
 
 @jit
-def StoDLP_self(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
+def StoDLP_self(sx, snx, scur, sw, mu, dens):
     """Evaluate 2D Stokes double-layer velocity, pressure, and traction."""
     if dens is None:
         dens = jnp.array([])
 
-    u, p, T = StoDLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu)
+    u, p, T = StoDLPmat_self(sx, snx, scur, sw, mu)
     if dens.size > 0:
         u = u @ dens
         p = p @ dens
@@ -510,12 +313,11 @@ def StoDLP_self(tx, tnx, sx, snx, sxp, scur, sw, mu, dens):
     return u, p, T
 
 @jit
-def StoDLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
-    # jax.debug.print("\n in DLPmat selfeval", ordered=True)
-    self_eval = True
+def StoDLPmat_self(sx, snx, scur, sw, mu):
     """Build dense matrices for double-layer velocity, pressure, and traction."""
     N = sx.size
-    M = tx.size
+    tx = sx
+    tnx = snx
 
     r = tx[:, None] - sx[None, :]
     irr = 1.0 / (jnp.conj(r) * r)
@@ -531,19 +333,15 @@ def StoDLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
         [(1.0 / jnp.pi) * d1**2 * rdotnir4, A12],
         [A12, (1.0 / jnp.pi) * d2**2 * rdotnir4]
     ])
-    if self_eval:
-        cdiag = -scur / (2 * jnp.pi)
-        tx = 1j * snx
-        t1, t2 = jnp.real(tx), jnp.imag(tx)
-        idx = jnp.arange(N)
-        A = A.at[idx, idx].set(cdiag * t1**2)
-        A = A.at[idx + N, idx].set(cdiag * t1 * t2)
-        A = A.at[idx, idx + N].set(cdiag * t1 * t2)
-        A = A.at[idx + N, idx + N].set(cdiag * t2**2)
+    cdiag = -scur / (2 * jnp.pi)
+    tx = 1j * snx
+    t1, t2 = jnp.real(tx), jnp.imag(tx)
+    idx = jnp.arange(N)
+    A = A.at[idx, idx].set(cdiag * t1**2)
+    A = A.at[idx + N, idx].set(cdiag * t1 * t2)
+    A = A.at[idx, idx + N].set(cdiag * t1 * t2)
+    A = A.at[idx + N, idx + N].set(cdiag * t2**2)
     A *= jnp.concatenate([sw, sw])
-
-
-    # jax.debug.print("after A", ordered=True)
 
     # --- Pressure matrix ---
     P = jnp.block([
@@ -551,7 +349,6 @@ def StoDLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
          jnp.imag(-snx)[None, :] * irr + 2 * rdotnir4 * d2]
     ])
     P *= (mu / jnp.pi) * jnp.concatenate([sw, sw])
-    # jax.debug.print("after P", ordered=True)
 
     # --- Traction matrix ---
     nx1 = jnp.real(tnx)[:, None]
@@ -586,14 +383,17 @@ def StoDLPmat_self(tx, tnx, sx, snx, sxp, scur, sw, mu):
         [d2 * nx1, d2 * nx2]
     ])
     T *= (mu / jnp.pi) * jnp.concatenate([sw, sw])
-    # jax.debug.print("after T", ordered=True)
 
     return A, P, T
 
 # ----------------------------------------------------------------------
 # --- Close evaluation funtions ----------------------------------------------
+# --- Based on the needed problem set up, all global quadr are for exterior problems (particle)
+# ---           and all panel quadr are for interior problems (wall).
+# --- Can generalize by adding <side> as a static argument when compiling. 
 # ----------------------------------------------------------------------
-def cau_closeglobal(x, sx, swxp, vb, side='i'):
+@jit
+def cau_closeglobal(x, sx, swxp, vb):
     """
     JAX implementation of Globally compensated barycentric Cauchy integral.
     
@@ -602,7 +402,6 @@ def cau_closeglobal(x, sx, swxp, vb, side='i'):
         sx:  N quadrature nodes (complex128)
         swxp: N complex weights (s.cw in MATLAB)
         vb:  N x Nc boundary values
-        side: 'i' for interior, 'e' for exterior
         
     Returns:
         vc, vcp, vcpp (Value, 1st Deriv, 2nd Deriv)
@@ -628,10 +427,7 @@ def cau_closeglobal(x, sx, swxp, vb, side='i'):
     # 2. Compute Values (vc)
     I0 = jnp.matmul(vb.T, comp).T
     J0 = jnp.sum(comp, axis=0)[:, jnp.newaxis]
-    
-    if side == 'e':
-        J0 = J0 - 2j * jnp.pi
-        
+    J0 = J0 - 2j * jnp.pi
     vc = I0 / J0
     
     # Replace hits using JAX select (jit-safe)
@@ -649,8 +445,7 @@ def cau_closeglobal(x, sx, swxp, vb, side='i'):
     Y = Y + jnp.diag(diag_vals)
     
     vbp = jnp.matmul(Y.T, vb)
-    if side == 'e':
-        vbp = vbp + 2j * jnp.pi * vb
+    vbp = vbp + 2j * jnp.pi * vb
     vbp = (-1.0 / swxp[:, jnp.newaxis]) * vbp
     
     vcp = jnp.matmul(vbp.T, comp).T / J0
@@ -658,8 +453,7 @@ def cau_closeglobal(x, sx, swxp, vb, side='i'):
 
     # 4. Second Derivative (vcpp)
     vbpp = jnp.matmul(Y.T, vbp)
-    if side == 'e':
-        vbpp = vbpp + 2j * jnp.pi * vbp
+    vbpp = vbpp + 2j * jnp.pi * vbp
     vbpp = (-1.0 / swxp[:, jnp.newaxis]) * vbpp
     
     vcpp = jnp.matmul(vbpp.T, comp).T / J0
@@ -667,7 +461,8 @@ def cau_closeglobal(x, sx, swxp, vb, side='i'):
 
     return vc, vcp, vcpp
 
-def cau_closepanel(tx, sx, swxp, a, b, side='i'):
+@jit
+def cau_closepanel(tx, sx, swxp, a, b):
     """
     JAX implementation of complex DLP special quadrature (Helsing).
     Args:
@@ -675,7 +470,6 @@ def cau_closepanel(tx, sx, swxp, a, b, side='i'):
         sx: Source nodes (p,)
         swxp: Complex speed weights (p,)
         a, b: Panel endpoints (complex)
-        side: 'i' or 'e'
     """
     p = sx.shape[0]
     M = tx.shape[0]
@@ -695,9 +489,6 @@ def cau_closepanel(tx, sx, swxp, a, b, side='i'):
 
     # Phase for branch cut
     gam = jnp.exp(1j * jnp.pi / 4.0)
-    if side == 'e':
-        gam = jnp.conj(gam)
-
     # Initialize P_1 for all targets
     p1 = jnp.log(gam) + jnp.log((1.0 - x) / (gam * (-1.0 - x)))
     
@@ -768,10 +559,8 @@ def cau_closepanel(tx, sx, swxp, a, b, side='i'):
 
     return A, A1, A2, A3, A4
 
-cau_closeglobal = jit(cau_closeglobal, static_argnums=(4,))
-cau_closepanel = jit(cau_closepanel, static_argnums=(5,))
-
-def CSLPselfmatrix(sx, st, sxp, side='i'):
+@jit
+def CSLPselfmatrix(sx, st, sxp):
     N = sx.shape[0]
     ssp = jnp.abs(sxp)
     
@@ -794,18 +583,14 @@ def CSLPselfmatrix(sx, st, sxp, side='i'):
 
     # Construct Circulant Rjn
     m = jnp.arange(1, N // 2)
-    if side == 'e':
-        r_vals = jnp.concatenate([jnp.array([0.0]), 1.0/m, jnp.array([1.0/N]), 0.0*m])
-    else:
-        r_vals = jnp.concatenate([jnp.array([0.0]), 0.0*m, jnp.array([1.0/N]), 1.0/m[::-1]])
-    
+    r_vals = jnp.concatenate([jnp.array([0.0]), 1.0/m, jnp.array([1.0/N]), 0.0*m])
     Rjn = jnp.fft.ifft(r_vals)
-    
     circ_mat = circulant(Rjn)
     
     return (S / N + circ_mat) * ssp[None, :]
 
-def lapSLP_closeglobal(x, sx, sxp, st, sa, sws, tau, side='i'):
+@jit
+def lapSLP_closeglobal(x, sx, sxp, st, sa, sws, tau):
     """
     Returns potential and derivatives at targets x due to single layer potential with real-valued density tau sampled at sx. 
     Uses global barycentric Cauchy close-evaluation.
@@ -816,7 +601,6 @@ def lapSLP_closeglobal(x, sx, sxp, st, sa, sws, tau, side='i'):
         sx, st, sws = source nodes (as complex points) and geometric properties
         sa = a point interior to the curve, used if side='e'
         tau = density sampled at sx, real valued, cannot be empty. apply u(x) for each column of tau.
-        side = 'i' or 'e': interior or exterior problem. For particles, side = 'e'.
 
     Outputs:
         u = column vectors of Laplace SL from each column of tau.
@@ -834,21 +618,20 @@ def lapSLP_closeglobal(x, sx, sxp, st, sa, sws, tau, side='i'):
     sw = sws / ssp
     swxp = sw * sxp
     
-    vb = CSLPselfmatrix(sx, st, sxp, side) @ tau
-    if side=='e':
-        sawlog = st / 1j + jnp.log(sa - sx)
-        p = jnp.imag(jnp.diff(sawlog))
-        jumps = 2j * jnp.pi * jnp.cumsum(jnp.round(p / (2 * jnp.pi)))
-        sawlog = sawlog.at[1:].add(-jumps)
+    vb = CSLPselfmatrix(sx, st, sxp) @ tau
+    sawlog = st / 1j + jnp.log(sa - sx)
+    p = jnp.imag(jnp.diff(sawlog))
+    jumps = 2j * jnp.pi * jnp.cumsum(jnp.round(p / (2 * jnp.pi)))
+    sawlog = sawlog.at[1:].add(-jumps)
 
-        totchgp = jnp.sum(sws[:, None] * tau, axis=0) / (2 * jnp.pi)
-        vb = vb + sawlog[:, None] * totchgp
-        
-        cw = 1j * snx * sws
-        vinf = jnp.sum(vb * (cw / (sx - sa))[:, None], axis=0) / (2j * jnp.pi)
-        vb = vb - vinf[None, :]
+    totchgp = jnp.sum(sws[:, None] * tau, axis=0) / (2 * jnp.pi)
+    vb = vb + sawlog[:, None] * totchgp
+    
+    cw = 1j * snx * sws
+    vinf = jnp.sum(vb * (cw / (sx - sa))[:, None], axis=0) / (2j * jnp.pi)
+    vb = vb - vinf[None, :]
 
-    [v, vp, vpp] = cau_closeglobal(x, sx, swxp, vb, side)
+    [v, vp, vpp] = cau_closeglobal(x, sx, swxp, vb)
     # Potentials and partials
     u = jnp.real(v)
     ux = jnp.real(vp)
@@ -857,21 +640,21 @@ def lapSLP_closeglobal(x, sx, sxp, st, sa, sws, tau, side='i'):
     uxy = -jnp.imag(vpp)
     uyy = -jnp.real(vpp)
     
-    if side == 'e':
-        inv_dist = 1.0 / (sa - x)
-        inv_dist_sq = 1.0 / (sa - x)**2
-        
-        u = u - jnp.log(jnp.abs(sa - x))[:, None] * totchgp + jnp.real(vinf)[None, :]
-        ux = ux + jnp.real(inv_dist)[:, None] * totchgp
-        uy = uy - jnp.imag(inv_dist)[:, None] * totchgp
-        
-        uxx = uxx + jnp.real(inv_dist_sq)[:, None] * totchgp
-        uxy = uxy - jnp.imag(inv_dist_sq)[:, None] * totchgp
-        uyy = uyy - jnp.real(inv_dist_sq)[:, None] * totchgp
+    inv_dist = 1.0 / (sa - x)
+    inv_dist_sq = 1.0 / (sa - x)**2
+    
+    u = u - jnp.log(jnp.abs(sa - x))[:, None] * totchgp + jnp.real(vinf)[None, :]
+    ux = ux + jnp.real(inv_dist)[:, None] * totchgp
+    uy = uy - jnp.imag(inv_dist)[:, None] * totchgp
+    
+    uxx = uxx + jnp.real(inv_dist_sq)[:, None] * totchgp
+    uxy = uxy - jnp.imag(inv_dist_sq)[:, None] * totchgp
+    uyy = uyy - jnp.real(inv_dist_sq)[:, None] * totchgp
 
     return u, ux, uy, uxx, uxy, uyy
 
 # SHOULD be the same as function in structure_jax.py.
+@jit
 def perispecdiff(f):
     N = f.shape[0]
     if N % 2 == 0:
@@ -885,7 +668,8 @@ def perispecdiff(f):
     else:
         return jnp.fft.ifft(1j * k * jnp.fft.fft(f))
 
-def lapDLP_closeglobal(x, sx, swxp, tau, side='i'):
+@jit
+def lapDLP_closeglobal(x, sx, swxp, tau):
     """
     JAX JIT-compatible Laplace DLP potential and derivatives.
     
@@ -893,7 +677,6 @@ def lapDLP_closeglobal(x, sx, swxp, tau, side='i'):
         x: Target points (complex M)
         sx, snx, sxp, swxp: Curve arrays (complex/float N)
         tau: Density (real N x n)
-        side: 'i' (interior) or 'e' (exterior)
     """
     N = sx.shape[0]
     tau = jnp.atleast_2d(tau)
@@ -921,23 +704,18 @@ def lapDLP_closeglobal(x, sx, swxp, tau, side='i'):
     vb = vb - (1.0 / (1j * N)) * taup
 
     # Jump condition: v_minus = v_plus - tau
-    if side == 'i':
-        vb = vb - tau
+    # vb = vb - tau
 
     # 2. Compensated close-evaluation
-    [v, vp, _] = cau_closeglobal(x, sx, swxp, vb, side)
+    [v, vp, _] = cau_closeglobal(x, sx, swxp, vb)
     
     u = jnp.real(v)
     ux = jnp.real(vp)
     uy = -jnp.imag(vp)
 
-    # jax.debug.print("row dim of u: {}", u.shape[0])
-    
     return u, ux, uy
 
-lapSLP_closeglobal = jit(lapSLP_closeglobal, static_argnums=(7,))
-lapDLP_closeglobal = jit(lapDLP_closeglobal, static_argnums=(4,))
-
+# @jit
 def perispecinterp(f, N):
     """
     JAX implementation of periodic spectral interpolation, 1D.
@@ -949,7 +727,8 @@ def perispecinterp(f, N):
         return jax.vmap(_perispecinterp_core, in_axes=(1,None), out_axes=1)(f, N)
     else:
         return _perispecinterp_core(f, N)
-    
+
+# @jit 
 def _perispecinterp_core(f, N):
     n = f.shape[0]
     if N == n:
@@ -990,7 +769,8 @@ def _perispecinterp_core(f, N):
         
     return g * (N / n)
 
-def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu, side='e'):
+@jit
+def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu):
     """
     JAX implementation of Stokes SLP velocity, pressure, and traction.
     
@@ -1009,23 +789,22 @@ def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu, side='e'):
     # Compute geometric properties
     ssp = jnp.abs(sxp)
     snx = -1j * (sxp / ssp)
-    sw = sws / ssp
     
     # --- Velocity calculation (Step 1) ---
     # SLP with real part of sigma
     I1x1, I3x1, I3x2, s1xx, s1xy, s1yy = lapSLP_closeglobal(
-        x, sx, sxp, st, sa, sws, jnp.real(sigma), side
+        x, sx, sxp, st, sa, sws, jnp.real(sigma)
     )
     # SLP with imag part of sigma
     I1x2, I4x1, I4x2, s2xx, s2xy, s2yy = lapSLP_closeglobal(
-        x, sx, sxp, st, sa, sws, jnp.imag(sigma), side
+        x, sx, sxp, st, sa, sws, jnp.imag(sigma)
     )
     I1 = (I1x1 + 1j * I1x2) / 2.0
     
     # SLP with tau = Re(y * conj(sigma))
     tau_dens = jnp.real(sx[:, None] * jnp.conj(sigma))
     _, I2x1, I2x2, stxx, stxy, styy = lapSLP_closeglobal(
-        x, sx, sxp, st, sa, sws, tau_dens, side
+        x, sx, sxp, st, sa, sws, tau_dens
     )
     I2 = (I2x1 + 1j * I2x2) / 2.0
     
@@ -1050,7 +829,7 @@ def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu, side='e'):
     tau_f = sigf / sf_nx[:, None] # rotation by n_y for pressure --- this requires the upsampled grid.
 
     # Re-use the LapDLP logic from earlier
-    p_val, _, _ = lapDLP_closeglobal(x, sf_x, sf_swxp, tau_f, side)
+    p_val, _, _ = lapDLP_closeglobal(x, sf_x, sf_swxp, tau_f)
     p = jnp.real(p_val)
     
     # --- Traction calculation (Step 3) ---
@@ -1068,7 +847,8 @@ def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu, side='e'):
     return u, p, T
 
 # TODO: check T close eval.
-def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu, side='e'):
+@jit
+def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu):
     """
     JIT-compatible Stokes Double Layer Potential (DLP) close evaluation.
     
@@ -1108,24 +888,24 @@ def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu, side='e'):
     # Potential I1 calculation
     # tauf = sigf * (real(n)/n) -> undoes the rotation inherent in some Laplace kernels
     tauf_x1 = sigf * (jnp.real(sf_nx) / sf_nx)[:, jnp.newaxis]
-    [I1x1,_,_] = lapDLP_closeglobal(x, sf_x, sf_swxp, tauf_x1, side)
+    [I1x1,_,_] = lapDLP_closeglobal(x, sf_x, sf_swxp, tauf_x1)
     
     tauf_x2 = sigf * (jnp.imag(sf_nx) / sf_nx)[:, jnp.newaxis]
-    [I1x2,_,_] = lapDLP_closeglobal(x, sf_x, sf_swxp, tauf_x2, side)
+    [I1x2,_,_] = lapDLP_closeglobal(x, sf_x, sf_swxp, tauf_x2)
     
     I1 = I1x1 + 1j * I1x2
 
     # --- 2. Potential I2 ---
     # tau = real(s.x * conj(sigma))
     tau2 = jnp.real(sx[:, jnp.newaxis] * jnp.conj(sigma))
-    [_, I2x1, I2x2] = lapDLP_closeglobal(x, sx, swxp, tau2, side)
+    [_, I2x1, I2x2] = lapDLP_closeglobal(x, sx, swxp, tau2)
     I2 = I2x1 + 1j * I2x2
 
     # --- 3. Potentials I3 and I4 ---
-    [_, I3x1, I3x2] = lapDLP_closeglobal(x, sx, swxp, jnp.real(sigma), side)
+    [_, I3x1, I3x2] = lapDLP_closeglobal(x, sx, swxp, jnp.real(sigma))
     I3 = jnp.real(x[:, jnp.newaxis]) * (I3x1 + 1j * I3x2)
     
-    [_, I4x1, I4x2] = lapDLP_closeglobal(x, sx, swxp, jnp.imag(sigma), side)
+    [_, I4x1, I4x2] = lapDLP_closeglobal(x, sx, swxp, jnp.imag(sigma))
     I4 = jnp.imag(x[:, jnp.newaxis]) * (I4x1 + 1j * I4x2)
 
     # Combine for Velocity
@@ -1151,10 +931,7 @@ def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu, side='e'):
     # vb = Y * tau / (-2i*pi) - tau' / (i*N)
     vb = (Y.T @ tau_T) * (1.0 / (-2j * jnp.pi))
     vb = vb - (1.0 / (1j * N)) * taup
-    # Jump condition: v_minus = v_plus - tau
-    if side == 'i':
-        vb = vb - tau_T
-    [_, Az, Azz] = cau_closeglobal(x, sx, swxp, vb, side)
+    [_, Az, Azz] = cau_closeglobal(x, sx, swxp, vb)
     # 1. Reshape for broadcasting (N, 1) and (1, M)
     tx_col = jnp.reshape(x,(-1, 1))
     sx_row = jnp.reshape(sx, (1, -1))
@@ -1211,8 +988,9 @@ def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu, side='e'):
     
     return u, p, T
 
-
-def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu, side='i'):
+# TODO: T close panel implement and check.
+@jit
+def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu):
     """
     JIT-compatible version of StoDLP_closepanel.
     
@@ -1276,7 +1054,7 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu, s
         
         # 2. Close Evaluation (The "Dspecialquad" logic)
         # These functions (Ak, L1, L2) must also be JIT-compatible
-        [Ak, L1, L2, _, _] = cau_closepanel(tx, skx, skwxp, slo, shi, side)
+        [Ak, L1, L2, _, _] = cau_closepanel(tx, skx, skwxp, slo, shi)
         
         # I1: Undo n_y rotation and apply special quadrature
         tauf_x1 = sigk * (jnp.real(sknx) / sknx)[:, jnp.newaxis]
@@ -1300,7 +1078,7 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu, s
 
         # 3. Far Evaluation (Naive StoDLP)
         sigk_real = jnp.vstack([jnp.real(sigk),jnp.imag(sigk)])
-        [u_far, p_far, _] = StoDLP(tx, tnx, skx, sknx, skxp, skcur, skws, mu, sigk_real)
+        [u_far, p_far, _] = StoDLP(tx, tnx, skx, sknx, skws, mu, sigk_real)
         u_far_complex = u_far[:M,:] + 1j * u_far[M:,:]
 
         # 4. Blend based on proximity
@@ -1323,10 +1101,6 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu, s
     
     return A, final_p
 
-stoSLP_closeglobal = jit(stoSLP_closeglobal, static_argnums=(9,))
-stoDLP_closeglobal = jit(stoDLP_closeglobal, static_argnums=(7,))
-stoDLP_closepanel = jit(stoDLP_closepanel, static_argnums=(10,))
-
 # ----------------------------------------------------------------------
 # --- Example / self-test ----------------------------------------------
 # ----------------------------------------------------------------------
@@ -1335,8 +1109,11 @@ def unit_test_far():
     Z_top = lambda t : t + 1j*(1 + 0.3*jnp.sin(t))
     Zp_top = lambda t : 1 + 1j*(0.3*jnp.cos(t))
     Z_bot = lambda t : t + 1j*(-1 + 0.3*jnp.sin(t))
-    [sx,sxp,snx,scur,sw] = channel_wall_func(Z_top,N,True, Zp_top)
-    [sx2,sxp2,snx2,scur2,sw2] = channel_wall_func(Z_bot,N,False, Zp_top)
+    [sx,sxp,snx,scur,sw] = channel_wall_func(Z_top,N,Zp_top)
+    [sx2,sxp2,snx2,scur2,sw2] = channel_wall_func(Z_bot,N, Zp_top)
+    snx = -1*snx
+    scur = -1*scur
+    sxp = -1*sxp
     # Combine top and bottom walls into one Wall object.
     sx = jnp.concatenate([sx,sx2])
     sxp = jnp.concatenate([sxp,sxp2])
@@ -1353,7 +1130,7 @@ def unit_test_far():
     print("Unit Testing Stokes kernel functions using MATLAB Matrices. \n Note that MATLAB returns NAN for the following self eval matrices: SL p, DL p, DL T.")
 
     print("\n Testing Sotkes SLP far ...")
-    u, p, T = StoSLP(tx, tnx, sx, snx, sxp, scur, sw, mu, jnp.array([]))
+    u, p, T = StoSLP(tx, tnx, sx, sw, mu, jnp.array([]))
     # load u,p,T matrices to compare
     matlabMats = loadmat("../ExpectedMatrices/SL.mat")
     usl_mat = jnp.array(matlabMats['u'])
@@ -1363,7 +1140,7 @@ def unit_test_far():
     print("SL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}.".format(jnp.linalg.norm(usl_mat-u), jnp.linalg.norm(psl_mat-p), jnp.linalg.norm(Tsl_mat-T)))
 
     print("\n Testing Stokes SLP self...")
-    u, p, T = StoSLP_self(sx, snx, sx, snx, sxp, scur, sw, mu, jnp.array([]))
+    u, p, T = StoSLP_self(sx, snx, sxp, scur, sw, mu, jnp.array([]))
     # load u,p,T matrices to compare
     matlabMats = loadmat("../ExpectedMatrices/SLself.mat")
     usl_mat = jnp.array(matlabMats['u'])
@@ -1373,7 +1150,7 @@ def unit_test_far():
     print("SL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}.".format(jnp.linalg.norm(usl_mat-u), jnp.linalg.norm(psl_mat-p), jnp.linalg.norm(Tsl_mat-T)))
 
     print("\n Testing Sotkes DLP far ...")
-    u, p, T = StoDLP(tx, tnx, sx, snx, sxp, scur, sw, mu, jnp.array([]))
+    u, p, T = StoDLP(tx, tnx, sx, snx, sw, mu, jnp.array([]))
     # load u,p,T matrices to compare
     matlabMats = loadmat("../ExpectedMatrices/DL.mat")
     udl_mat = jnp.array(matlabMats['u'])
@@ -1383,7 +1160,7 @@ def unit_test_far():
     print("DL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}.".format(jnp.linalg.norm(udl_mat-u), jnp.linalg.norm(pdl_mat-p), jnp.linalg.norm(Tdl_mat-T)))
 
     print("\n Testing Stokes DLP self...")
-    u, p, T = StoDLP_self(sx, snx, sx, snx, sxp, scur, sw, mu, jnp.array([]))
+    u, p, T = StoDLP_self(sx, snx, scur, sw, mu, jnp.array([]))
     # load u,p,T matrices to compare
     matlabMats = loadmat("../ExpectedMatrices/DLself.mat")
     udl_mat = jnp.array(matlabMats['u'])
@@ -1418,7 +1195,7 @@ def unit_test_close():
     Z_ptcl = lambda t : 1 + 0.3*jnp.cos(t) + 1j*(0.3*jnp.sin(t)+0.25)
     Zp_ptcl = lambda t : - 0.3*jnp.sin(t) + 1j*0.3*jnp.cos(t)
     Zpp_ptcl = lambda t : - 0.3*jnp.cos(t) - 1j*0.3*jnp.sin(t)
-    [ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,False, Zp_ptcl, Zpp_ptcl)
+    [ptx,ptxp,ptnx,ptcur,ptw] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
     ptwxp = ptw / jnp.abs(ptxp) * ptxp
     pta = 1+0.25j # a point interior to ptcl, use its center
     ptt = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False) # use fact that global quadr always have this t.
@@ -1436,7 +1213,7 @@ def unit_test_close():
     sxlo_test = sxlo[test_panel]
     sxhi_test = sxhi[test_panel]
     swxp_test = swxp[test_panel*p_wall : (test_panel+1)*p_wall]
-    [v,dv1,dv2,ddv1,ddv2] = cau_closepanel(tx, sx_test, swxp_test, sxlo_test, sxhi_test, 'i')
+    [v,dv1,dv2,ddv1,ddv2] = cau_closepanel(tx, sx_test, swxp_test, sxlo_test, sxhi_test)
     # Load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/cau_panel.mat")
     vwall_mat = jnp.array(matlabMats['v'])
@@ -1450,7 +1227,7 @@ def unit_test_close():
     tx = jnp.array([2+0.2j,1+0.8j])
     tnx = jnp.array([1+1j,1+1j])
     # cau_closeglobal is less flexible than MATLAB version, so need always to input some form of density. 
-    [v1,vp1,vpp1] = cau_closeglobal(tx,ptx,ptwxp,jnp.eye(ptx.shape[0]),'e')
+    [v1,vp1,vpp1] = cau_closeglobal(tx,ptx,ptwxp,jnp.eye(ptx.shape[0]))
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/cau_global.mat")
     vptcl_mat = jnp.array(matlabMats['v'])
@@ -1460,7 +1237,7 @@ def unit_test_close():
     print("Cau Diff from MATLAB: v: {:.3g}, vp: {:.3g}, vpp: {:.3g}".format(jnp.linalg.norm(vptcl_mat-v1), jnp.linalg.norm(vpptcl_mat-vp1), jnp.linalg.norm(vppptcl_mat-vpp1)))
 
     print("\n TEST 2: Laplace SL and DL close evals, global only. ")
-    [v,dv1,dv2,ddv1,ddv12,ddv2] = lapSLP_closeglobal(tx,ptx,ptxp,ptt,pta,ptw,jnp.eye(ptx.shape[0]),'e')
+    [v,dv1,dv2,ddv1,ddv12,ddv2] = lapSLP_closeglobal(tx,ptx,ptxp,ptt,pta,ptw,jnp.eye(ptx.shape[0]))
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/lapsl_global.mat")
     vptcl_mat = jnp.array(matlabMats['v'])
@@ -1472,7 +1249,7 @@ def unit_test_close():
     # Compare with JAX
     print("Lap SL Diff from MATLAB: v: {:.3g}, dv1: {:.3g}, dv2: {:.3g}, ddv1: {:.3g}, ddv12: {:.3g}, ddv2: {:.3g}".format(jnp.linalg.norm(vptcl_mat-v), jnp.linalg.norm(dv1ptcl_mat-dv1), jnp.linalg.norm(dv2ptcl_mat-dv2), jnp.linalg.norm(ddv1ptcl_mat-ddv1), jnp.linalg.norm(ddv12ptcl_mat-ddv12), jnp.linalg.norm(ddv2ptcl_mat-ddv2)))
 
-    [v,dv1,dv2] = lapDLP_closeglobal(tx,ptx,ptwxp,jnp.eye(ptx.shape[0]),'e')
+    [v,dv1,dv2] = lapDLP_closeglobal(tx,ptx,ptwxp,jnp.eye(ptx.shape[0]))
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/lapdl_global.mat")
     vptcl_mat = jnp.array(matlabMats['v'])
@@ -1485,7 +1262,7 @@ def unit_test_close():
     mu = 0.7
     
     sigma_real = jnp.eye(2*ptx.shape[0])
-    [u,p,T] = stoSLP_closeglobal(tx,tnx,ptx,ptxp,ptt,pta,ptw,sigma_real,mu,'e')
+    [u,p,T] = stoSLP_closeglobal(tx,tnx,ptx,ptxp,ptt,pta,ptw,sigma_real,mu)
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/stosl_global.mat")
     uptcl_mat = jnp.array(matlabMats['u'])
@@ -1494,7 +1271,7 @@ def unit_test_close():
     # Compare with JAX
     print("Stokes SL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p), jnp.linalg.norm(Tptcl_mat-T)))
 
-    [u,p,_] = stoDLP_closeglobal(tx,tnx,ptx,ptxp,ptwxp,sigma_real,mu,'e')
+    [u,p,_] = stoDLP_closeglobal(tx,tnx,ptx,ptxp,ptwxp,sigma_real,mu)
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/stodl_global.mat")
     uptcl_mat = jnp.array(matlabMats['u'])
@@ -1505,7 +1282,7 @@ def unit_test_close():
     print("\n TEST 4: Stokes DLP panel based close eval. ")
     tx = jnp.array([2+1.2j,1+0.8j])
     sigma_real = jnp.eye(2*sx.shape[0])
-    [u,p] = stoDLP_closepanel(tx,tnx,sx,sxp,sws,scur,sxlo,sxhi,sigma_real,mu,'i')
+    [u,p] = stoDLP_closepanel(tx,tnx,sx,sxp,sws,scur,sxlo,sxhi,sigma_real,mu)
     # load matlab matrix 
     matlabMats = loadmat("../ExpectedMatrices/stodl_panel.mat")
     u_mat = jnp.array(matlabMats['A'])
