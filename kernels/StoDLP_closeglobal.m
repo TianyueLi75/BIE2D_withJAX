@@ -1,4 +1,4 @@
-function [u p] = StoDLP_closeglobal(t, s, mu, sigma, side)
+function [u, p, T] = StoDLP_closeglobal(t, s, mu, sigma, side)
 % STODLP_CLOSEGLOBAL - close-eval velocity Stokes DLP w/ global quadr curve
 %
 % u = StoDLP_closeglobal(t,s,mu,dens,side) returns velocities at targets t.x
@@ -11,6 +11,9 @@ function [u p] = StoDLP_closeglobal(t, s, mu, sigma, side)
 %  The pressure uses the gradient of a single Laplace DLP call.
 %
 % [u p] = StoDLP_closeglobal(t,s,mu,dens,side) also returns pressure at targets
+% [u p T] = StoDLP_closeglobal(t,s,mu,dens,side) includes close eval for
+%           traction as well, using its decomposition into Laplace DL, its gradient,
+%           and Hessians. [Wu 2020] (ChocoLi Feb2026)
 %
 % Inputs:
 %  t = target struct with t.x = M-by-1 list of targets in complex plane
@@ -28,6 +31,7 @@ function [u p] = StoDLP_closeglobal(t, s, mu, sigma, side)
 %  u = velocity values at targets (2M-by-1): all 1- then all 2-cmpts.
 %      Or, if 2M-by-2N velocity evaluation matrix (if dens=[])
 %  p = pressure values at targets (M-by-1), or M-by-2N evaluation matrix.
+%  T = traction at targets (2M-by-1) in target normal direction t.nx.
 %
 % Called without arguments, a self-test (far eval & mat vs StoDLP) is done.
 %
@@ -41,6 +45,14 @@ function [u p] = StoDLP_closeglobal(t, s, mu, sigma, side)
 
 if nargin==0, test_StoDLP_closeglobal; return; end
 
+if nargin<5
+    side = 'e';
+end
+
+if nargin<4
+    sigma = [];
+end
+
 N=size(s.x,1); M=size(t.x,1);       % # srcs, # targs
 mat = isempty(sigma);
 if mat, sigma=eye(2*N); end         % case of dense matrix
@@ -49,7 +61,7 @@ Nc = size(sigma,2);                 % # density vecs (cols)
 
 % find I_1:
 % Bowei's version with "illegal" complex tau, with interp to fine nodes
-beta = 2.2;  % >=1: how many times more dense to make fine nodes, for I_1
+beta = 2;  % >=1: how many times more dense to make fine nodes, for I_1
 Nf = ceil(beta*numel(s.x)/2)*2;  % nearest even # fine nodes
 sf.x = perispecinterp(s.x,Nf); sf = setupquad(sf); % build fine nodes
 sigf=zeros(Nf,Nc);
@@ -71,10 +83,12 @@ I2 = I2x1+1i*I2x2;
 
 % find I_3 and I_4
 if ~mat
-    [~, I3x1, I3x2] = LapDLP_closeglobal(t, s, real(sigma), side);
+    [~, I3x1, I3x2, info_real] = LapDLP_closeglobal(t, s, real(sigma), side);
     I3 = bsxfun(@times, real(t.x), I3x1+1i*I3x2);
-    [~, I4x1, I4x2] = LapDLP_closeglobal(t, s, imag(sigma), side);
+    vb_real = info_real.vb;
+    [~, I4x1, I4x2, info_imag] = LapDLP_closeglobal(t, s, imag(sigma), side);
     I4 = bsxfun(@times, imag(t.x), I4x1+1i*I4x2);
+    vb_imag = info_imag.vb;
 else        % *** specific to the matrix case, not arb Nc...
     [~, L1, L2] = LapDLP_closeglobal(t, s, eye(N), side);  % only need 1 call
     I4x1=[zeros(M,N),L1];      % could be tidied up, but not a bottleneck...
@@ -93,11 +107,96 @@ u=[real(u);imag(u)];    % back to real notation, always stack [u1;u2]
 % ans: it's I1, of course. (Alex, 2013)
 
 if nargout>1  % ----------- want pressure, do its extension (not in [lsc2c])
-  if ~mat
-    p = -2*mu*(I3x1 + I4x2);   % already computed for u, turns out easy
-  else
-    p = -2*mu*[L1,L2];         % "
-  end
+    if ~mat
+        p = -2*mu*(I3x1 + I4x2);   % already computed for u, turns out easy
+    else
+        p = -2*mu*[L1,L2];         % "
+    end
+
+    if nargout>2 % ---------- want traction
+        if ~isfield(t,'nx')
+          error("\n Traction needs target normal from t.nx.\n");
+        end
+
+        % TODO: debug why this didn't work...
+        % if ~mat
+        %     % For x1*gradD[sig1] + x2*gradD[sig2]
+        %     % [~, I3x1, I3x2] = LapDLP_closeglobal(t, s, real(sigma), side);
+        %     % I3 = bsxfun(@times, real(t.x), I3x1+1i*I3x2);
+        %     % [~, I4x1, I4x2] = LapDLP_closeglobal(t, s, imag(sigma), side);
+        %     % I4 = bsxfun(@times, imag(t.x), I4x1+1i*I4x2);
+        %     % TODO: check input scaling
+        %     [~,~,Issig1] = Cau_closeglobal(t.x,s,1i/2/pi*real(sigma),side);
+        %     [~,~,Issig2] = Cau_closeglobal(t.x,s,1i/2/pi*imag(sigma),side);
+        %     Hes1 = [ real(Issig1)-imag(Issig2); -imag(Issig1)+real(Issig2) ];
+        %     xdotnx = real(t.x) .* real(t.nx) + imag(t.x) .* imag(t.nx);
+        %     xdotnx_Hessian = [xdotnx;xdotnx] .* Hes1; 
+        %     [~,~,Isy1sig1] = Cau_closeglobal(t.x,s,1i/2/pi*real(s.x).*real(sigma),side);
+        %     [~,~,Isy1sig2] = Cau_closeglobal(t.x,s,1i/2/pi*real(s.x).*imag(sigma),side); 
+        %     Hessian_y1sig = [ real(Isy1sig1)-imag(Isy1sig2); -imag(Isy1sig1)+real(Isy1sig2) ];
+        %     nx1_Hessian = [real(t.nx);real(t.nx)] .* Hessian_y1sig;
+        %     [~,~,Isy2sig1] = Cau_closeglobal(t.x,s,1i/2/pi*imag(s.x).*real(sigma),side);
+        %     [~,~,Isy2sig2] = Cau_closeglobal(t.x,s,1i/2/pi*imag(s.x).*imag(sigma),side);
+        %     Hessian_y2sig = [ real(Isy2sig1)-imag(Isy2sig2); -imag(Isy2sig1)+real(Isy2sig2) ];
+        %     nx2_Hessian = [imag(t.nx);imag(t.nx)] .* Hessian_y2sig;
+        %     T1 = -2 .* (xdotnx_Hessian - nx1_Hessian - nx2_Hessian);
+        % 
+        %     nx_gradD_1 = real(t.nx) .* I3x1 + imag(t.nx) .* I3x2;
+        %     nx_gradD_2 = real(t.nx) .* I4x1 + imag(t.nx) .* I4x2;
+        %     nx_gradD = [nx_gradD_1 ; nx_gradD_2]; 
+        %     nxcross_gradD = [ real(t.nx) .* I3x1+real(t.nx) .* I4x2 ; imag(t.nx) .* I3x1+imag(t.nx) .* I4x2]; % TODO: check entries
+        %     gradD_crossnx = [ real(t.nx) .* I3x1+imag(t.nx) .* I4x1 ; real(t.nx) .* I3x2+imag(t.nx) .* I4x2];
+        %     T2 = 3 .* nx_gradD - nxcross_gradD - gradD_crossnx; 
+        % 
+        %     [~, new_I3x1, new_I3x2] = LapDLP_closeglobal(t, s, conj(s.nx)./s.nx.*real(sigma), side);
+        %     [~, new_I4x1, new_I4x2] = LapDLP_closeglobal(t, s, conj(s.nx)./s.nx.*imag(sigma), side);
+        %     new_nx_gradD_1 = real(t.nx) .* new_I3x1 + imag(t.nx) .* new_I3x2;
+        %     new_nx_gradD_2 = real(t.nx) .* new_I4x1 + imag(t.nx) .* new_I4x2;
+        %     new_nx_gradD = [new_nx_gradD_1; -1.*new_nx_gradD_2];
+        %     new_nxcross_gradD = [ real(t.nx) .* new_I3x1+real(t.nx) .* new_I4x2 ; imag(t.nx) .* new_I3x1+imag(t.nx) .* new_I4x2];
+        %     new_gradD_crossnx = [ real(t.nx) .* new_I3x1+real(t.nx) .* new_I4x1 ; imag(t.nx) .* new_I3x2+imag(t.nx) .* new_I4x2];
+        %     T3 = new_nx_gradD + new_nxcross_gradD - new_gradD_crossnx;
+        % 
+        %     T = (T1 + T2 + T3) * mu; 
+        % 
+        % else
+
+        [~, ~, ~, info_mat] = LapDLP_closeglobal(t, s, [], side);
+        vb_mat = info_mat.vb;
+        [~,Az,Azz] = Cau_closeglobal(t.x,s,vb_mat,side); 
+
+        hx11   = -2*real(Azz).*real((t.x-s.x.').*(conj(t.nx)*ones(1,numel(s.x))));  
+        dxr11  =  real(Az).*(real(t.nx)*ones(1,numel(s.x))); 
+        dxi11  = -3*imag(Az).*(imag(t.nx)*ones(1,numel(s.x)));   
+        dxrc11 =  real(Az.*(ones(numel(t.x),1)*(conj(s.nx)./s.nx).')).*(real(t.nx)*ones(1,numel(s.x)));  
+        dxic11 = -imag(Az.*(ones(numel(t.x),1)*(conj(s.nx)./s.nx).')).*(imag(t.nx)*ones(1,numel(s.x)));  
+        
+        T11 = hx11+dxr11+dxi11+dxrc11+dxic11;
+        
+        hx12   =  2*imag(Azz).*real((t.x-s.x.').*(conj(t.nx)*ones(1,numel(s.x))));
+        dxr12  = -real(Az).*(imag(t.nx)*ones(1,numel(s.x)));
+        dxi12  =  imag(Az).*(real(t.nx)*ones(1,numel(s.x))); 
+        dxrc12 = -real(Az.*(ones(numel(t.x),1)*(conj(s.nx)./s.nx).')).*(imag(t.nx)*ones(1,numel(s.x)));
+        dxic12 = -imag(Az.*(ones(numel(t.x),1)*(conj(s.nx)./s.nx).')).*(real(t.nx)*ones(1,numel(s.x)));
+        
+        T12 = hx12+dxr12+dxi12+dxrc12+dxic12;
+        
+        
+        hx22   =  2*real(Azz).*real((t.x-s.x.').*(conj(t.nx)*ones(1,numel(s.x))));
+        dxr22  =  3*real(Az).*(real(t.nx)*ones(1,numel(s.x)));
+        dxi22  = -imag(Az).*(imag(t.nx)*ones(1,numel(s.x)));
+        dxrc22 = -real(Az.*(ones(numel(t.x),1)*(conj(s.nx)./s.nx).')).*(real(t.nx)*ones(1,numel(s.x)));
+        dxic22 =  imag(Az.*(ones(numel(t.x),1)*(conj(s.nx)./s.nx).')).*(imag(t.nx)*ones(1,numel(s.x)));
+        
+        T22 = hx22+dxr22+dxi22+dxrc22+dxic22;
+
+        T = mu * [T11,T12; T12, T22];
+        if ~mat
+            T = T * [real(sigma); imag(sigma)];
+        end
+
+
+    end
 end
 
 %%%%%%%%%%%%%%%%%%%%
@@ -107,22 +206,23 @@ verb = 0;       % to visualize
 s = wobblycurve(1,0.3,5,280); s.a = mean(s.x); if verb,figure;showsegment(s);end
 mu = 0.9;       % viscosity (real, pos)
 tau = [0.7+sin(3*s.t); -0.4+cos(2*s.t)];  % pick smooth density w/ nonzero mean
-nt = 100; t.nx = exp(2i*pi*rand(nt,1));  % target normals
+nt = 2; t.nx = exp(2i*pi*rand(nt,1));  % target normals
 %profile clear; profile on;
-for side = 'ie'
+% for side = 'ie'
+for side='e'
   if side=='e', t.x = 1.5+1i+rand(nt,1)+1i*rand(nt,1);         % distant targs
   else, t.x = 0.6*(rand(nt,1)+1i*rand(nt,1)-(0.5+0.5i)); end % targs far inside
   if verb, plot(t.x,'.'); end
   fprintf('\nside = %s:\n',side)
-  [u p] = StoSLP(t,s,mu,tau);    % eval given density cases...
-  tic, [uc pc] = StoSLP_closeglobal(t,s,mu,tau,side);
-  fprintf('Sto DLP density eval (%.3g sec), max abs err in u cmpts, p:\n',toc)
-  disp([max(abs(u-uc)), max(abs(p-pc))])
-  tic, [Ac Pc] = StoSLP_closeglobal(t,s,mu,[],side); % fill 20x slower than apply
-  fprintf('matrix fill (%.3g sec) & apply, max abs err in u cmpts, p:\n',toc)
-  disp([max(abs(u-Ac*tau)), max(abs(p-Pc*tau))])
-  [A P] = StoSLP(t,s,mu);   % compare matrix els...
-  fprintf('matrix fill, max abs matrix element diffs for u, p (more stringent, not needed):\n')
-  disp([max(abs(A(:)-Ac(:))), max(abs(P(:)-Pc(:)))])
+  [u, p, T] = StoDLP(t,s,mu,tau);    % eval given density cases...
+  tic, [uc, pc, Tc] = StoDLP_closeglobal(t,s,mu,tau,side);
+  fprintf('Sto DLP density eval (%.3g sec), max abs err in u cmpts, p, T:\n',toc)
+  disp([max(abs(u-uc)), max(abs(p-pc)), max(abs(T-Tc))])
+  tic, [Ac, Pc, Tc] = StoDLP_closeglobal(t,s,mu,[],side); % fill 20x slower than apply
+  fprintf('matrix fill (%.3g sec) & apply, max abs err in u cmpts, p, T:\n',toc)
+  disp([max(abs(u-Ac*tau)), max(abs(p-Pc*tau)), max(abs(T - Tc*tau))])
+  [A, P, T] = StoDLP(t,s,mu);   % compare matrix els...
+  fprintf('matrix fill, max abs matrix element diffs for u, p, T (more stringent, not needed):\n')
+  disp([max(abs(A(:)-Ac(:))), max(abs(P(:)-Pc(:))), max(abs(T(:) - Tc(:)))])
 end
 %profile off; profile viewer

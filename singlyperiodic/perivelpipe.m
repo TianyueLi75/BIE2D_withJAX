@@ -419,91 +419,14 @@ function [E A B C Q] = ELSmatrix_multi(s,ptcl_cell,p,proxyrep,mu,uc)
     
     E = [A B; C Q];
 end
-    
-% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% Choco Feb 2026: include RBM (net force and net torque, U and Omega in
-% ptcl B.C.
-function [E A B C Q] = ELSmatrix_rbm(s,ptcl_cell,p,proxyrep,mu,uc)
-    % builds matrix blocks for Stokes extended linear system, D rep only
-    N = numel(s.x);
-    % Collect info from all cells for far evals
-    ptcl_tot = ptcl_cell{1};
-    if numel(ptcl_cell)>1
-        for cellind=2:numel(ptcl_cell)
-            ptcl_tot = mergesegquads([ptcl_tot, ptcl_cell{cellind}]);
-        end
-    end
-    % Separate formulation for wall vs ptcl
-    A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
-    A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum(@StoSLP,uc.trlist,[],s,ptcl_tot,mu); % all particle to wall
-    [A21,~,A21_T] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-    
-    % A22 = -eye(2*numel(ptcl_tot.x))/2 + srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
-    [A22_dl,~,A22_dlT] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu);
-    [A22_sl,~,A22_slT] = srcsum_ptcl_wrapper(@StoSLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu); % TODO: add traction to srcsum_ptcl_wrapper
-    A22 = -eye(2*numel(ptcl_tot.x))/2 + A22_dl + A22_sl;
-    A = [A11 A12; A21 A22];
-    
-    % Todo: BCgammaMat size and order
-    BCgammaMat = zeros(numel(s.x)*2 + numel(ptcl_tot.x)*2, numel(s.x)*2 + numel(ptcl_tot.x)*3 + 3);
-    BCgammaMat(1:numel(s.x)*2, 1:(numel(s.x)*2+numel(ptcl_tot.x)*2)) = [A11 A12]; % start with (wall-ptcl) to wall velocity
-    for ptcl_ind=1:numel_ptcl_cell
-        % Compute force and torque per particle
-        s_sqr = ptcl_cell{ptcl_ind};
-        Xc = sum(real(s_sqr.x))/numel(s_sqr.x) + 1j*sum(imag(s_sqr.x))/numel(s_sqr.x);
-        XmXc = [real(s_sqr.x)-real(Xc).*ones(size(s_sqr.x)); imag(s_sqr.x)-imag(Xc).*ones(size(s_sqr.x))]; 
-        x_ind = numel(s.x)*2 + ptcl_ind*numel(s_sqr.x)
-        BCgammaMat(1+numel(s.x)*2 + ptcl_ind*numel(s_sqr.x))
-        BCgammaMat = [BcgammaMat;
-                    [-1.*ones(size(s_sqr.t));zeros(size(s_sqr.t))] % Ux
-                    [zeros(size(s_sqr.t));-1*ones(size(s_sqr.t))] % Uy
-                    [-XmXc(1+end/2:end)'; XmXc(1:end/2)]]; % Omega cross X-Xc.
-    end
-    % TODO: change this to correspond to ptcl B.C. and ptcl density, U, and
-    % Omega
-    BCgammaMat = [A % sqr_dens
-                [-1.*ones(size(s_sqr.t));zeros(size(s_sqr.t))] % Ux
-                [zeros(size(s_sqr.t));-1*ones(size(s_sqr.t))] % Uy
-                [-XmXc(1+end/2:end)'; XmXc(1:end/2)]]; % Omega
-    % TODO: multiply ptcl.ws(:) here for matmul with density directly
-    
-    % Force from all ptcls, wall, and proxy
-    T3 = A22_dlT + A22_slT;
-    fMat_sqr = -(-eye(size(T3))/2 + T3); 
-    fMat_wall = - A21_T;
-    fMat_prx = - B2_T;
-    
-    B1 = proxyrep(s,p,mu);     % map from proxy density to vel on curve
-    [B2,~,B2_T] = proxyrep(ptcl_tot,p,mu);
-    B = [B1;B2];
-    d = uc.e1*uc.nei;         % src transl to use
-    
-    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,s,mu); 
-    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,s,mu);
-    C1 = [CRD-CLD; TRD-TLD];
-    [CLD,~,TLD] = srcsum(@StoDLP,d,[],uc.L,ptcl_tot,mu); 
-    [CLS,~,TLS] = srcsum(@StoSLP,d,[],uc.L,ptcl_tot,mu);
-    [CRD,~,TRD] = srcsum(@StoDLP,-d,[],uc.R,ptcl_tot,mu);
-    [CRS,~,TRS] = srcsum(@StoSLP,-d,[],uc.R,ptcl_tot,mu);
-    C2 = [CRD-CLD + CRS-CLS; TRD-TLD + TRS-TLS];
-    C = [C1 C2];
-    
-    [QL,~,QLt] = proxyrep(uc.L,p,mu); [QR,~,QRt] = proxyrep(uc.R,p,mu); % vel, tract
-    Q = [QR-QL; QRt-QLt];
-    
-    E = [A B; C Q];
-    % TODO: Order of mats, include fMat.
-end
-    
+
 % %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % for multiple particles contained in ptcl_cell, create large matrix with
 % block structure [A11 A12 ...; A21 A22 ...] 
 % Necessary since SLP self eval uses fft so requires input as one enclosed
 % particle.
-% Note: currently only one output since used only in self-to-self for all
-% particles
-function U = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
+function [U, P, T] = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
     num_ptcl = numel(ptcl_cell);
     ptcl_tot = ptcl_cell{1};
     ptcl_idx = zeros(1,num_ptcl+1); % row of starting indices for each particle
@@ -515,6 +438,8 @@ function U = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
     ptcl_tot_size = numel(ptcl_tot.x);
     ptcl_idx(num_ptcl+1) = ptcl_tot_size+1; % ghost entry for end of array
     U = zeros(ptcl_tot_size*2);
+    P = zeros(ptcl_tot_size,ptcl_tot_size*2);
+    T = zeros(ptcl_tot_size*2);
 
     for i=1:num_ptcl
         ptcl_i = ptcl_cell{i};
@@ -523,13 +448,33 @@ function U = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
             trgind = [ptcl_idx(j):(ptcl_idx(j+1)-1),(ptcl_tot_size+ptcl_idx(j)) : (ptcl_tot_size+ptcl_idx(j+1)-1)];
             if i==j
                 % ptcl_i self eval
-                u = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                if nargout == 1
+                    u = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                elseif nargout == 2
+                    [u, pres] = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                elseif nargout == 3
+                    [u, pres, trac] = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                end
             else
                 ptcl_j = ptcl_cell{j};
                 % particle i (with nbrs) to ptcl j
-                u = srcsum(kernel,trlist,[],ptcl_j,ptcl_i,mu);
+                % u = srcsum(kernel,trlist,[],ptcl_j,ptcl_i,mu);
+                if nargout == 1
+                    u = srcsum(kernel,trlist,[],ptcl_j,ptcl_i,mu);
+                elseif nargout == 2
+                    [u, pres] = srcsum(kernel,trlist,[],ptcl_j,ptcl_i,mu);
+                elseif nargout == 3
+                    [u, pres, trac] = srcsum(kernel,trlist,[],ptcl_j,ptcl_i,mu);
+                end
             end
             U(trgind,srcind) = U(trgind, srcind) + u;
+            if nargout > 1
+                P(trgind(1:end/2),srcind) = P(trgind(1:end/2),srcind) + pres;
+            end
+            if nargout > 2
+                T(trgind,srcind) = T(trgind,srcind) + trac;
+            end
+
         end
     end
 end
