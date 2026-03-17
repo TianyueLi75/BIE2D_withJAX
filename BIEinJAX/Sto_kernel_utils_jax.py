@@ -1067,7 +1067,8 @@ def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu, side='e'):
     
     return u, p, T
 
-def stoDLP_closeglobal(x, sx, sxp, swxp, sigma_real, mu, side='e'):
+# TODO: check T close eval.
+def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu, side='e'):
     """
     JIT-compatible Stokes Double Layer Potential (DLP) close evaluation.
     
@@ -1135,8 +1136,80 @@ def stoDLP_closeglobal(x, sx, sxp, swxp, sigma_real, mu, side='e'):
     
     # Pressure calculation
     p = -2 * mu * (I3x1 + I4x2)
+
+    # Traction close eval
+    # input to Cauchy integral for scaled and stable LapDLP_closeglobal
+    tau_T = jnp.eye(N)
+    taup = jax.vmap(perispecdiff, in_axes=1, out_axes=1)(tau_T)
+    diff_mat = sx[:, None] - sx[None, :]
+    # Avoid division by zero on diagonal for now
+    Y = 1.0 / (diff_mat + jnp.eye(N)) 
+    Y = Y * swxp[:, None] # include complex weights over columns
+    # Set diagonal to -sum_{j != i} Y_{ij}
+    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=1)
+    Y = Y * (1.0 - jnp.eye(N)) + jnp.diag(diag_vals)
+    # vb = Y * tau / (-2i*pi) - tau' / (i*N)
+    vb = (Y.T @ tau_T) * (1.0 / (-2j * jnp.pi))
+    vb = vb - (1.0 / (1j * N)) * taup
+    # Jump condition: v_minus = v_plus - tau
+    if side == 'i':
+        vb = vb - tau_T
+    [_, Az, Azz] = cau_closeglobal(x, sx, swxp, vb, side)
+    # 1. Reshape for broadcasting (N, 1) and (1, M)
+    tx_col = jnp.reshape(x,(-1, 1))
+    sx_row = jnp.reshape(sx, (1, -1))
+    # Pre-process normals into columns for target-wise broadcasting
+    tnx_conj_col = jnp.reshape(jnp.conj(nx), (-1, 1))
+    tnx_real_col = jnp.reshape(jnp.real(nx), (-1, 1))
+    tnx_imag_col = jnp.reshape(jnp.imag(nx), (-1, 1))
     
-    return u, p
+    # Complex ratio for source normals (row vector)
+    snx_ratio_row = jnp.reshape(jnp.conj(snx) / snx, (1, -1))
+    
+    # hx_core = real((t.x-s.x.').*(conj(t.nx)*ones))
+    dx_mat = tx_col - sx_row
+    hx_core = jnp.real(dx_mat * tnx_conj_col)
+    
+    # Matrix of (Az * source normal ratio)
+    Az_ratio = Az * snx_ratio_row
+    
+    # Extract real and imaginary components of matrices functionally
+    Azz_r, Azz_i = jnp.real(Azz), jnp.imag(Azz)
+    Az_r, Az_i   = jnp.real(Az), jnp.imag(Az)
+    Azr_r, Azr_i = jnp.real(Az_ratio), jnp.imag(Az_ratio)
+    
+    # --- T11 Components ---
+    T11 = (-2 * Azz_r * hx_core + 
+            Az_r * tnx_real_col - 
+            3 * Az_i * tnx_imag_col + 
+            Azr_r * tnx_real_col - 
+            Azr_i * tnx_imag_col)
+    
+    # --- T12 Components ---
+    T12 = (2 * Azz_i * hx_core - 
+           Az_r * tnx_imag_col + 
+           Az_i * tnx_real_col - 
+           Azr_r * tnx_imag_col - 
+           Azr_i * tnx_real_col)
+    
+    # --- T22 Components ---
+    T22 = (2 * Azz_r * hx_core + 
+           3 * Az_r * tnx_real_col - 
+           Az_i * tnx_imag_col - 
+           Azr_r * tnx_real_col + 
+           Azr_i * tnx_imag_col)
+    
+    # Direct application to sigma: T * [real(sigma); imag(sigma)]
+    sig_r = jnp.real(sigma)
+    sig_i = jnp.imag(sigma)
+    
+    # Using jnp.matmul for the matrix-vector products
+    res_top = mu * (jnp.matmul(T11, sig_r) + jnp.matmul(T12, sig_i))
+    res_bot = mu * (jnp.matmul(T12, sig_r) + jnp.matmul(T22, sig_i))
+    
+    T = jnp.concatenate([res_top, res_bot], axis=0)
+    
+    return u, p, T
 
 
 def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu, side='i'):
@@ -1251,7 +1324,7 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu, s
     return A, final_p
 
 stoSLP_closeglobal = jit(stoSLP_closeglobal, static_argnums=(9,))
-stoDLP_closeglobal = jit(stoDLP_closeglobal, static_argnums=(6,))
+stoDLP_closeglobal = jit(stoDLP_closeglobal, static_argnums=(7,))
 stoDLP_closepanel = jit(stoDLP_closepanel, static_argnums=(10,))
 
 # ----------------------------------------------------------------------
@@ -1421,7 +1494,7 @@ def unit_test_close():
     # Compare with JAX
     print("Stokes SL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p), jnp.linalg.norm(Tptcl_mat-T)))
 
-    [u,p] = stoDLP_closeglobal(tx,ptx,ptxp,ptwxp,sigma_real,mu,'e')
+    [u,p,_] = stoDLP_closeglobal(tx,tnx,ptx,ptxp,ptwxp,sigma_real,mu,'e')
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/stodl_global.mat")
     uptcl_mat = jnp.array(matlabMats['u'])

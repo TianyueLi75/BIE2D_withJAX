@@ -224,71 +224,6 @@ def ELSmatrix_ptcl_update(A, B, C, Q, sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, p
     return E, Anew, Bnew, Cnew, Q
 ELSmatrix_ptcl_update = jit(ELSmatrix_ptcl_update, static_argnums=(14))
 
-# Replace only parts of A relying on ptcl position, Bptcl, Cptcl.
-# DEPRECATED: changing immutable arrays are much harder in jax, so use new version with vmap instead.
-def ELSmatrix_ptcl_update_old(A, B, C, Q, sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu):
-    trlist = jnp.array([-peri_len, 0, peri_len])
-    Nsx = len(sx)
-    [A12_dl,_,_] = srcsum(StoDLP, trlist, sx, snx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu) # from ptcl to s
-    [A12_sl,_,_] = srcsum(StoSLP, trlist, sx, snx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu) 
-    [A21,_,_] = srcsum(StoDLP, trlist, ptx, ptnx, sx, snx, sxp, jnp.array([]), sw, mu) # from s to ptcl
-    n_tr = trlist.size
-    Nptx = len(ptx)
-    N_ptcl_double = Nptx/num_ptcl
-    N_ptcl = int(N_ptcl_double)
-    u = jnp.zeros((2*Nptx,2*Nptx))
-    for j in range(num_ptcl):
-        for k in range(num_ptcl):
-            if j==k:
-                # self-near to self does not change
-                ttu= jnp.block([ [A[2*Nsx+j*N_ptcl:2*Nsx+(j+1)*N_ptcl, 2*Nsx+j*N_ptcl:2*Nsx+(j+1)*N_ptcl], A[2*Nsx+j*N_ptcl:2*Nsx+(j+1)*N_ptcl, 2*Nsx+Nptx+j*N_ptcl:2*Nsx+Nptx+(j+1)*N_ptcl]], 
-                                          [A[2*Nsx+Nptx+j*N_ptcl:2*Nsx+Nptx+(j+1)*N_ptcl, 2*Nsx+j*N_ptcl:2*Nsx+(j+1)*N_ptcl], A[2*Nsx+Nptx+j*N_ptcl:2*Nsx+Nptx+(j+1)*N_ptcl, 2*Nsx+Nptx+j*N_ptcl:2*Nsx+Nptx+(j+1)*N_ptcl]]])
-                u = u.at[j*N_ptcl:(j+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(ttu[:N_ptcl,:N_ptcl]) # x to x
-                u = u.at[j*N_ptcl:(j+1)*N_ptcl, (Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttu[:N_ptcl,N_ptcl:]) # y to x
-                u = u.at[(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(ttu[N_ptcl:,:N_ptcl]) # x to y
-                u = u.at[(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl),(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttu[N_ptcl:,N_ptcl:]) # y to y
-                
-            else:
-                for i in range(0,n_tr):
-                    ptx1 = ptx + trlist[i]
-                    # Assume all srcs have same discretization orders
-                    ptx_cur = ptx1[j*N_ptcl:(j+1)*N_ptcl] # source shifted by trlist[i]
-                    ptnx_cur = ptnx[j*N_ptcl:(j+1)*N_ptcl]
-                    ptxp_cur = ptxp[j*N_ptcl:(j+1)*N_ptcl]
-                    ptcur_cur = ptcur[j*N_ptcl:(j+1)*N_ptcl]
-                    ptw_cur = ptw[j*N_ptcl:(j+1)*N_ptcl]
-                    tx_cur = ptx[k*N_ptcl:(k+1)*N_ptcl] # target always in center copy
-                    tnx_cur = ptnx[k*N_ptcl:(k+1)*N_ptcl]
-                    [ttu, _, _] = StoSLP(tx_cur, tnx_cur, ptx_cur, ptnx_cur, ptxp_cur, ptcur_cur, ptw_cur, mu, jnp.array([])) # particle j to k SL
-                    [ttuD, _, _] = StoDLP(tx_cur, tnx_cur, ptx_cur, ptnx_cur, ptxp_cur, ptcur_cur, ptw_cur, mu, jnp.array([])) # particle j to k DL
-                    ttu = ttu + ttuD
-                    
-                    u = u.at[k*N_ptcl:(k+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(ttu[:N_ptcl,:N_ptcl]) # x to x
-                    u = u.at[k*N_ptcl:(k+1)*N_ptcl, (Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttu[:N_ptcl,N_ptcl:]) # y to x
-                    u = u.at[(Nptx+k*N_ptcl):(Nptx+(k+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(ttu[N_ptcl:,:N_ptcl]) # x to y
-                    u = u.at[(Nptx+k*N_ptcl):(Nptx+(k+1)*N_ptcl),(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttu[N_ptcl:,N_ptcl:]) # y to y
-
-    A11 = A[:2*Nsx,:2*Nsx]
-    Anew = jnp.block( [ [A11,A12_dl+A12_sl], [A21, u]])
-
-    B1 = B[:2*Nsx,:]
-    [B2,_,_] = StoSLP(ptx, ptnx, px, jnp.array([]), pxp, jnp.array([]), pwt, mu, jnp.array([]))
-    Bnew = jnp.vstack([B1,B2])
-
-    C1 = C[:,:2*Nsx]
-    [CLDp, _, TLDp] = srcsum(StoDLP, peri_len, lx, lnx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu)
-    [CRDp, _, TRDp] = srcsum(StoDLP, -peri_len, rx, rnx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu) 
-    [CLSp, _, TLSp] = srcsum(StoSLP, peri_len, lx, lnx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu)
-    [CRSp, _, TRSp] = srcsum(StoSLP, -peri_len, rx, rnx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu) 
-    C2 = jnp.vstack([CRDp - CLDp + CRSp - CLSp, TRDp - TLDp + TRSp - TLSp])
-    Cnew = jnp.hstack([C1,C2])
-
-    # --- Full ELS matrix ---
-    E = jnp.block([[Anew, Bnew],
-                   [Cnew, Q]])
-
-    return E, Anew, Bnew, Cnew, Q
-
 
 @jit
 def ELSmatrix_stokeslet(sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_stokeslet, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu):
@@ -372,7 +307,7 @@ def ELSmatrix_stokeslet_f0(sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet, w_
 
 # A DL formulation on wall (like before) and SL+DL on particle
 # Include RBM with unknown U and Omega; implement net force and net torque zero conditions.
-def ELSmatrix_RBM(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu):
+def ELSmatrix_rbm(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl, px, pxp, pwt, lx, lnx, rx, rnx, peri_len, mu):
     # trlist = peri_len*jnp.array([-1,0,1])
     trlist = jnp.array([-peri_len, 0, peri_len])
     Nsx = len(sx)
@@ -381,20 +316,24 @@ def ELSmatrix_RBM(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl,
     [A12_dl,_,_] = srcsum(StoDLP, trlist, sx, snx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu) # from ptcl to s
     [A12_sl,_,_] = srcsum(StoSLP, trlist, sx, snx, ptx, ptnx, ptxp, jnp.array([]), ptw, mu) 
     [A21,_,A21_T] = srcsum(StoDLP, trlist, ptx, ptnx, sx, snx, sxp, jnp.array([]), sw, mu) # from s to ptcl
-    [A22_dl,_,A22_dl_T] = srcsum_self(StoDLP_self, StoDLP, trlist, ptx, ptnx, ptxp, ptcur, ptw, mu) # double layer self does not have single-particle assumption
-    
+    [A22_dl,_,_] = srcsum_self(StoDLP_self, StoDLP, trlist, ptx, ptnx, ptxp, ptcur, ptw, mu) # double layer self does not have single-particle assumption
+    # Ptcl near nbr contribution to DL traction
+    ptx_l = ptx + trlist[0]
+    [_,_,A22_dlT_1] = StoDLP(ptx,ptnx,ptx_l,ptnx,ptxp,ptcur,ptw,mu,jnp.array([]))
+    ptx_r = ptx + trlist[2]
+    [_,_,A22_dlT_2] = StoDLP(ptx,ptnx,ptx_r,ptnx,ptxp,ptcur,ptw,mu,jnp.array([]))
+
     n_tr = trlist.size
-    N_ptcl_double = Nsx/num_ptcl
-    # N_ptcl = N_ptcl_double.astype(int)
+    Nptx = len(ptx)
+    N_ptcl_double = Nptx/num_ptcl
     N_ptcl = int(N_ptcl_double)
+    # jax.debug.print("Num nodes wall = {Nsx}, Num nodes ptcl each = {N_ptcl}", Nsx=Nsx, N_ptcl = N_ptcl)
     # first translation -- all src evals are far.
     ptx1 = ptx + trlist[0]
-    [u,p,T] = StoSLP(ptx, ptnx, ptx1, ptnx, ptxp, ptcur, ptw, mu, jnp.array([]))
+    [u, _, T] = StoSLP(ptx, ptnx, ptx1, ptnx, ptxp, ptcur, ptw, mu, jnp.array([]))
     for i in range(1,n_tr):
         ptx1 = ptx + trlist[i]
         if i==1: # Have to hard code for JIT: len 3 trlist, middle one is 0.
-            # [tempu,tempp,tempT] = kernel_self(sx, snx, sx, snx, sxp, scur, sw, mu, jnp.array([]))
-
             for j in range(num_ptcl):
                 # Assume all srcs have same discretization orders
                 ptx_cur = ptx[j*N_ptcl:(j+1)*N_ptcl]
@@ -402,51 +341,45 @@ def ELSmatrix_RBM(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl,
                 ptxp_cur = ptxp[j*N_ptcl:(j+1)*N_ptcl]
                 ptcur_cur = ptcur[j*N_ptcl:(j+1)*N_ptcl]
                 ptw_cur = ptw[j*N_ptcl:(j+1)*N_ptcl]
-                [tempu,tempp,tempT] = StoSLP_self(ptx_cur, ptnx_cur, ptx_cur, ptnx_cur, ptxp_cur, ptcur_cur, ptw_cur, mu, jnp.array([])) # self to self on particle j (no jump condition)
+                [tempu, _, tempT] = StoSLP_self(ptx_cur, ptnx_cur, ptx_cur, ptnx_cur, ptxp_cur, ptcur_cur, ptw_cur, mu, jnp.array([])) # self to self on particle j (no jump condition)
                 # jax.debug.print("tempu self {}", tempu[0,0], ordered = True)
                 u = u.at[j*N_ptcl:(j+1)*N_ptcl, j*N_ptcl:(j+1)*N_ptcl].add(tempu[:N_ptcl,:N_ptcl]) # x to x
-                u = u.at[j*N_ptcl:(j+1)*N_ptcl, (Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(tempu[:N_ptcl,N_ptcl:]) # y to x
-                u = u.at[(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(tempu[N_ptcl:,:N_ptcl]) # x to y
-                u = u.at[(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl),(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(tempu[N_ptcl:,N_ptcl:]) # y to y
-                p = p.at[j*N_ptcl:(j+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(tempp[:,:N_ptcl]) # x to p
-                p = p.at[j*N_ptcl:(j+1)*N_ptcl,(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(tempp[:,N_ptcl:]) # y to p
-                # TODO: Check T's ordering.
-                T = T.at[j*N_ptcl:(j+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(tempT[:N_ptcl,:N_ptcl]) # x to x
-                T = T.at[j*N_ptcl:(j+1)*N_ptcl, (Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(tempT[:N_ptcl,N_ptcl:]) # y to x
-                T = T.at[(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(tempT[N_ptcl:,:N_ptcl]) # x to y
-                T = T.at[(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl),(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(tempT[N_ptcl:,N_ptcl:]) # y to y 
+                u = u.at[j*N_ptcl:(j+1)*N_ptcl, (Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(tempu[:N_ptcl,N_ptcl:]) # y to x
+                u = u.at[(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(tempu[N_ptcl:,:N_ptcl]) # x to y
+                u = u.at[(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl),(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(tempu[N_ptcl:,N_ptcl:]) # y to y
+                T = T.at[j*N_ptcl:(j+1)*N_ptcl, j*N_ptcl:(j+1)*N_ptcl].add(tempT[:N_ptcl,:N_ptcl]) # x to x
+                T = T.at[j*N_ptcl:(j+1)*N_ptcl, (Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(tempT[:N_ptcl,N_ptcl:]) # y to x
+                T = T.at[(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(tempT[N_ptcl:,:N_ptcl]) # x to y
+                T = T.at[(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl),(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(tempT[N_ptcl:,N_ptcl:]) # y to y
+                
                 for k in range(num_ptcl):
                     if k != j:
                         tx_cur = ptx[k*N_ptcl:(k+1)*N_ptcl]
                         tnx_cur = ptnx[k*N_ptcl:(k+1)*N_ptcl]
-                        [ttu, ttp, ttT] = StoSLP(tx_cur, tnx_cur, ptx_cur, ptnx_cur, ptxp_cur, ptcur_cur, ptw_cur, mu, jnp.array([])) # particle j to k
+                        [ttu, _, ttT] = StoSLP(tx_cur, tnx_cur, ptx_cur, ptnx_cur, ptxp_cur, ptcur_cur, ptw_cur, mu, jnp.array([])) # particle j to k
                         # u[k*N_ptcl:(k+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl] += ttu
                         u = u.at[k*N_ptcl:(k+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(ttu[:N_ptcl,:N_ptcl]) # x to x
-                        u = u.at[k*N_ptcl:(k+1)*N_ptcl, (Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(ttu[:N_ptcl,N_ptcl:]) # y to x
-                        u = u.at[(Nsx+k*N_ptcl):(Nsx+(k+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(ttu[N_ptcl:,:N_ptcl]) # x to y
-                        u = u.at[(Nsx+k*N_ptcl):(Nsx+(k+1)*N_ptcl),(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(ttu[N_ptcl:,N_ptcl:]) # y to y
-                        p = p.at[k*N_ptcl:(k+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(ttp[:,:N_ptcl]) # x to p
-                        p = p.at[k*N_ptcl:(k+1)*N_ptcl,(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(ttp[:,N_ptcl:]) # y to p
-                        # TODO: Check T's ordering.
+                        u = u.at[k*N_ptcl:(k+1)*N_ptcl, (Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttu[:N_ptcl,N_ptcl:]) # y to x
+                        u = u.at[(Nptx+k*N_ptcl):(Nptx+(k+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(ttu[N_ptcl:,:N_ptcl]) # x to y
+                        u = u.at[(Nptx+k*N_ptcl):(Nptx+(k+1)*N_ptcl),(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttu[N_ptcl:,N_ptcl:]) # y to y
                         T = T.at[k*N_ptcl:(k+1)*N_ptcl,j*N_ptcl:(j+1)*N_ptcl].add(ttT[:N_ptcl,:N_ptcl]) # x to x
-                        T = T.at[k*N_ptcl:(k+1)*N_ptcl, (Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(ttT[:N_ptcl,N_ptcl:]) # y to x
-                        T = T.at[(Nsx+k*N_ptcl):(Nsx+(k+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(ttT[N_ptcl:,:N_ptcl]) # x to y
-                        T = T.at[(Nsx+k*N_ptcl):(Nsx+(k+1)*N_ptcl),(Nsx+j*N_ptcl):(Nsx+(j+1)*N_ptcl)].add(ttT[N_ptcl:,N_ptcl:]) # y to y 
+                        T = T.at[k*N_ptcl:(k+1)*N_ptcl, (Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttT[:N_ptcl,N_ptcl:]) # y to x
+                        T = T.at[(Nptx+k*N_ptcl):(Nptx+(k+1)*N_ptcl),j*N_ptcl:(j+1)*N_ptcl].add(ttT[N_ptcl:,:N_ptcl]) # x to y
+                        T = T.at[(Nptx+k*N_ptcl):(Nptx+(k+1)*N_ptcl),(Nptx+j*N_ptcl):(Nptx+(j+1)*N_ptcl)].add(ttT[N_ptcl:,N_ptcl:]) # y to y
         else:
             # right-side copy, all src evals are far.
             [tempu,_,tempT] = StoSLP(ptx, ptnx, ptx1, ptnx, ptxp, ptcur, ptw, mu, jnp.array([]))
             u = u + tempu
             T = T + tempT
     A22_sl = u
-    A22_sl_T = T
+    A22_slT = T
 
-    A22 = -jnp.eye(2*len(ptx)) / 2. + A22_dl + A22_sl
-    A22_T = -jnp.eye(2*len(ptx)) / 2. + A22_dl_T + A22_sl_T
+    A22 = jnp.eye(2*len(ptx)) / 2. + A22_dl + A22_sl # CHANGED MAR 2026: avoid flipping normals for close eval. Particle initialization changed accordingly.
     A = jnp.block([[A11, A12_dl+A12_sl],
                    [A21, A22]])
 
     [B1,_,_] = StoSLP(sx, snx, px, jnp.array([]), pxp, jnp.array([]), pwt, mu, jnp.array([]))
-    [B2,_,_] = StoSLP(ptx, ptnx, px, jnp.array([]), pxp, jnp.array([]), pwt, mu, jnp.array([]))
+    [B2,_,B2_T] = StoSLP(ptx, ptnx, px, jnp.array([]), pxp, jnp.array([]), pwt, mu, jnp.array([]))
     B = jnp.vstack([B1, B2])
 
     [CLD, _, TLD] = srcsum(StoDLP, peri_len, lx, lnx, sx, snx, sxp, jnp.array([]), sw, mu)
@@ -463,13 +396,60 @@ def ELSmatrix_RBM(sx, snx, sxp, scur, sw, ptx, ptnx, ptxp, ptcur, ptw, num_ptcl,
     [QR, _, QRt ]= StoSLP(rx, rnx, px, jnp.array([]), pxp, jnp.array([]), pwt, mu, jnp.array([]))
     Q = jnp.vstack([QR - QL, QRt - QLt])
 
+    # Rigid body motion adding to boundary conditions
+    total_rows = 2*Nsx + 2*Nptx
+    total_cols = total_rows + 3 * num_ptcl
+    nodes_per_ptcl = Nptx // num_ptcl
+    bc_sqr = jnp.zeros((2*Nptx,3*num_ptcl))
+    ptx_2d = ptx.reshape(num_ptcl,nodes_per_ptcl) # ASSUMES same discr. on each ptcl
+    # X - Xc
+    Xc = jnp.mean(ptx_2d, axis=1, keepdims=1)
+    XmXc = ptx_2d - Xc
+    XmXc_flat = XmXc.reshape(-1)
+    
+    row_indices = jnp.arange(Nptx)
+    col_ux = jnp.repeat(jnp.arange(0, num_ptcl * 2, 2), nodes_per_ptcl)
+    col_uy = jnp.repeat(jnp.arange(1, num_ptcl * 2, 2), nodes_per_ptcl)
+    bc_sqr = bc_sqr.at[row_indices, col_ux].set(-1.0)
+    bc_sqr = bc_sqr.at[row_indices + Nptx, col_uy].set(-1.0)
+    col_omega = jnp.repeat(jnp.arange(num_ptcl * 2, 3 * num_ptcl), nodes_per_ptcl)
+    bc_sqr = bc_sqr.at[row_indices, col_omega].set(-jnp.imag(XmXc_flat))
+    bc_sqr = bc_sqr.at[row_indices + Nptx, col_omega].set(jnp.real(XmXc_flat))
+
+    bc_gamma_mat = jnp.zeros((total_rows, total_cols))
+    bc_gamma_mat = bc_gamma_mat.at[:, :total_rows].set(A)
+    bc_gamma_mat = bc_gamma_mat.at[2*Nsx:, total_rows:].set(bc_sqr)
+
+    # Net force zero and net torque zero conditions
+    T3 = A22_slT + A22_dlT_1 + A22_dlT_2
+    fMat_ptcl = - ( -jnp.eye(2*Nptx)/2. + T3)
+    fMat_wall = - A21_T
+    fMat_prx = - B2_T
+    
+    ptcl_cell_w = ptw.reshape(num_ptcl, nodes_per_ptcl) 
+    WF = jax.scipy.linalg.block_diag(*[w[None, :] for w in ptcl_cell_w])
+    tx_vals = -ptcl_cell_w * jnp.imag(XmXc)
+    ty_vals =  ptcl_cell_w * jnp.real(XmXc)
+    WTx = jax.scipy.linalg.block_diag(*[t[None, :] for t in tx_vals])
+    WTy = jax.scipy.linalg.block_diag(*[t[None, :] for t in ty_vals])
+    # MATLAB: [WFx, 0; 0, WFy]
+    intF_op = jax.scipy.linalg.block_diag(WF, WF)
+    # MATLAB: [WTx, WTy]
+    intT_op = jnp.concatenate([WTx, WTy], axis=1)
+    mid_zeros = jnp.zeros((2 * Nptx, 3 * num_ptcl))
+    big_mat = jnp.concatenate([fMat_wall, fMat_ptcl, mid_zeros, fMat_prx], axis=1)
+
+    intF = intF_op @ big_mat
+    intT = intT_op @ big_mat
+
     # --- Full ELS matrix ---
-    E = jnp.block([[A, B],
-                   [C, Q]])
+    E = jnp.block([[bc_gamma_mat, B],
+                   [intF],
+                   [intT],
+                   [C, jnp.zeros((C.shape[0],3*num_ptcl)), Q]])
 
-    return E, A, B, C, Q
-
-
+    return E, bc_gamma_mat, B, intF,intT, C, Q
+ELSmatrix_rbm = jit(ELSmatrix_rbm, static_argnums=(10))
 
 # Since JAX tracer distinguishes different inputs, need to use self-kernel when inputting self-interactions.
 # kernel_self and kernel are Python-callable kernel functions (e.g. StoDLP_self, StoDLP).
@@ -606,7 +586,7 @@ def srcsum_ptcl_stodl_closeglobal(trlist, tx, tnx, ptx, ptnx, pta, ptxp, ptcur, 
         ptwxp_cur = ptwxp[j*N_ptcl:(j+1)*N_ptcl]
         sigma_cur = jnp.concatenate([sigma[j*N_ptcl:(j+1)*N_ptcl], sigma[Nptx+j*N_ptcl:Nptx+(j+1)*N_ptcl]]) 
 
-        [tempu,tempp] = stoDLP_closeglobal(tx, ptx_cur, ptxp_cur, ptwxp_cur, sigma_cur, mu)
+        [tempu,tempp,_] = stoDLP_closeglobal(tx, tnx, ptx_cur, ptxp_cur, ptwxp_cur, sigma_cur, mu)
         u = u + tempu.ravel()
         p = p + tempp.ravel()
 
@@ -864,4 +844,30 @@ def evalsol_stokeslet(tx, tnx, sx, snx, sxp, scur, sw, x_stokeslet, xp_stokeslet
 
     u = u+uD+uD_sto
     p = p+pD+pD_sto
+    return u,p
+
+
+@jit
+def evalsol_rbm(tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, ptx, ptnx, ptt, pta, ptxp, ptcur, ptw, ptwxp, px, pxp, pwt, peri_len, mu, edens):
+    trlist = peri_len*jnp.array([-1,0,1])
+    N_wall = len(sx)
+    N_ptcl = len(ptx)
+    wall_dens = edens[:2*N_wall]
+    ptcl_dens = edens[2*N_wall:2*(N_wall+N_ptcl)]
+    Nskip = len(edens) - 2*(N_wall+N_ptcl+len(px)) # number of entries for U and Omega for each particle
+    prx_dens = edens[2*(N_wall+N_ptcl)+Nskip:]
+    
+    [u, p, _] = StoSLP(tx, tnx, px, jnp.array([]), pxp, jnp.array([]), pwt, mu, prx_dens)
+    [uD, pD] = srcsum_wall(trlist, tx, tnx, sx, sxlo, sxhi, snx, sxp, scur, sw, mu)
+
+    [uSp, pSp, _] = srcsum_ptcl_stosl_closeglobal(trlist,tx,tnx,ptx,ptnx,ptt,pta,ptcur,ptxp,ptw,ptcl_dens,mu)
+    [uDp, pDp] = srcsum_ptcl_stodl_closeglobal(trlist,tx,tnx,ptx,ptnx,pta,ptxp,ptcur,ptw,ptwxp,ptcl_dens,mu)
+
+    uD = uD @ wall_dens
+    pD = pD @ wall_dens
+    uDSp = uDp + uSp
+    pDSp = pDp + pSp
+
+    u = u+uD+uDSp
+    p = p+pD+pDSp
     return u,p
