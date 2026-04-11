@@ -2,14 +2,16 @@
 
 % TEST 1: spherical particle in free space: vslip = sin(s)/U should give
 % translation in x direction.
-Nptcl = 80;
+Nptcl = 280;
 mu=1.0;
-% ptcl.Z = @(t) 1 + 0.3*cos(t) + 1j*(0.3*sin(t)+0.25);
-% ptcl.Zp = @(t) - 0.3*sin(t) + 1j*0.3*cos(t);
-% ptcl.Zpp = @(t) - 0.3*cos(t) - 1j*0.3*sin(t);
-% ptcl = setupquad(ptcl, Nptcl);
-% ptcl.a = 1+0.25j;
-ptcl = wobblycurve(1,0.3,5,280); ptcl.a = mean(ptcl.x);
+ptcl.Z = @(t) 1 + 0.2*cos(t) + 1j*(0.3*sin(t)+0.25);
+ptcl.Zp = @(t) - 0.2*sin(t) + 1j*0.3*cos(t);
+ptcl.Zpp = @(t) - 0.2*cos(t) - 1j*0.3*sin(t);
+ptcl = setupquad(ptcl, Nptcl);
+ptcl.a = 1+0.25j;
+% ptcl = wobblycurve(0.8,0.3,5,Nptcl); 
+% ptcl.x = ptcl.x + 1;
+% ptcl.a = mean(ptcl.x);
 
 [A_dl,~,~] = StoDLP(ptcl,ptcl,mu);
 [A_sl,~,T_sl] = StoSLP(ptcl,ptcl,mu);
@@ -88,3 +90,6 @@ u1 = reshape(ug(1:Mt),size(xx)); u2 = reshape(ug(Mt+(1:Mt)),size(xx));
 magvals = u1.^2 + u2.^2;
 imagesc(gx,gy,magvals); axis equal; colorbar;
 hold on; quiver(gx,gy,u1,u2);
+[startX, startY] = meshgrid(gx(1:5:end), gy(1:5:end));
+verts = stream2(gx,gy,u1,u2,startX,startY);
+streamline(verts); 

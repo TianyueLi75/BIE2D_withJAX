@@ -4,8 +4,8 @@
 Num_panels = 10;
 p = 10; % order on panel
 N_perwall = p * Num_panels; qtype = 'p'; qntype = 'G'; 
-Nptcl = 80;
-Nlr = 10;
+Nptcl = 400;
+Nlr = 80;
 Nprx = 2*Nlr;    % # proxy pts (2 force comps per pt, so 2M dofs)
 
 % set up upper and lower walls
@@ -39,27 +39,30 @@ DX = @(x) x + 1i*(-1+0.3*sin(x));
 % UX = @(x) x + 1i;
 % DX = @(x) x - 1i;
 
-ptcl.Z = @(t) 1 + 0.3*cos(t) + 1j*(0.3*sin(t)+0.25); % changed center to y=0 for symmetric setup (for debugging)
-ptcl.Zp = @(t) - 0.3*sin(t) + 1j*0.3*cos(t);
-ptcl.Zpp = @(t) - 0.3*cos(t) - 1j*0.3*sin(t);
+ptcl.Z = @(t) 1 + 0.2*cos(t) + 1j*(0.3*sin(t)+0.25); % changed center to y=0 for symmetric setup (for debugging)
+ptcl.Zp = @(t) - 0.2*sin(t) + 1j*0.3*cos(t);
+ptcl.Zpp = @(t) - 0.2*cos(t) - 1j*0.3*sin(t);
 ptcl = setupquad(ptcl, Nptcl);
+% ptcl = wobblycurve(0.2,0.1,5,Nptcl);
+% ptcl.x = ptcl.x + 1+0.25j;
 ptcl.a = 1+0.25j;
 
-ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
-ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
-ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
-ptcl2 = setupquad(ptcl2, Nptcl);
-ptcl2.a = 5+0j;
-ptcl_cell = {ptcl,ptcl2};
+% ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
+% ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
+% ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
+% ptcl2 = setupquad(ptcl2, Nptcl);
+% ptcl2.a = 5+0j;
+% ptcl_cell = {ptcl,ptcl2};
 
-% ptcl_cell = {ptcl};
+ptcl_cell = {ptcl};
 
 % Collection of all panels on all particles
 ptcl_tot = ptcl;
 for ptcl_ind=2:numel(ptcl_cell)
     ptcl_tot = mergesegquads([ptcl_tot, ptcl_cell{ptcl_ind}]);
 end
-inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x))& ~inpolygon(real(z),imag(z),real(ptcl2.x),imag(ptcl2.x));
+% inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x))& ~inpolygon(real(z),imag(z),real(ptcl2.x),imag(ptcl2.x));
+inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x));
 % TODO: more generic "inside" function
 
 
@@ -83,13 +86,13 @@ P.x = pi + Rp*exp(2i*pi*(0:Nprx-1)'/Nprx); P = setupquad(P);     % proxy pts
 mu = 0.7;   % fluid viscosity
 vrhs = zeros(2*numel(s.x),1);
 
-B1 = 1;
-B2 = -1;
+B1 = 1.23;
+B2 = -0.73;
 vrhs_ptcl = get_vslip(B1,B2,ptcl_cell); 
 
 jump = 0;
 
-E = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc); 
+[E, A1, B1,C1,Q1] = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc); 
 
 Tjump = -jump * [real(R.nx);imag(R.nx)]; % traction driving growth (vector func)
 erhs = [vrhs; vrhs_ptcl; zeros(3*numel(ptcl_cell),1); zeros(2*Nlr,1);Tjump]; 
@@ -123,7 +126,11 @@ figure;
 magvals = sqrt(u1.^2 + u2.^2);
 imagesc(gx,gy,log10(magvals)); % colormap(jet(256)); 
 colorbar; hold on; 
-quiver(gx,gy, u1,u2,2); title('soln (u,p), with close-eval scheme')
+% quiver(gx,gy, u1,u2,2); 
+[startX, startY] = meshgrid(gx(1:5:end), gy(1:5:end));
+verts = stream2(gx,gy,u1,u2,startX,startY);
+streamline(verts); 
+title('soln u, with close-eval scheme')
 % showsegment({U,D,ptcl_tot}); 
 plot(U.x);
 plot(D.x);
@@ -134,17 +141,18 @@ showsegment({L,R}); plot(zt.x,'go');
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% end main %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-function vslip = get_vslip(B1,B2,ptcl_cell)
-    XmXc_tot = []; % X-Xc collected, complex style
+function vslip_tot = get_vslip(B1,B2,ptcl_cell)
+    vslip_tot = [];
     for ptcl_ind=1:numel(ptcl_cell)
         s_sqr = ptcl_cell{ptcl_ind};
         Xc = sum(real(s_sqr.x))/numel(s_sqr.x) + 1j*sum(imag(s_sqr.x))/numel(s_sqr.x);
         XmXc = s_sqr.x-Xc; 
-        XmXc_tot = [XmXc_tot; XmXc];
+        theta = atan2(imag(XmXc), real(XmXc));
+        u_theta = B1 * sin(theta) + B2 * sin(theta) .* cos(theta);
+        % vslip = [-u_theta .* sin(theta); u_theta .* cos(theta)];
+        vslip = [u_theta .* real(s_sqr.tang); u_theta .* imag(s_sqr.tang)];
+        vslip_tot = [vslip_tot; vslip];
     end
-    theta = atan2(imag(XmXc_tot), real(XmXc_tot)); % Angle of each node
-    u_theta = B1 * sin(theta) + B2 * sin(theta) .* cos(theta);
-    vslip = [-u_theta .* sin(theta); u_theta .* cos(theta)]; 
 end
 
 % Evaluation function (includes close eval on panel-based wall and global_quadr particle
@@ -190,7 +198,7 @@ function [u, p] = evalsol(s,ptcl_tot,ptcl_cell,pr,proxyrep,mu,U,z,co) % eval sol
     end
 end
 
-function E = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc)
+function [E, BCgammaMat, B, C, Q] = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc)
     % builds matrix blocks for Stokes extended linear system, D rep only
     N = numel(s.x);
     % Collect info from all cells for far evals
@@ -202,13 +210,13 @@ function E = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc)
     end
     % Source: wall.
     A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
-    % [A21,~,A21_T] = srcsum(@StoDLP_closepanel,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-    [A21,~,A21_T] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    [A21,~,A21_T] = srcsum(@StoDLP_closepanel,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    % [A21,~,A21_T] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
     % Source: particle.
-    % A12 = srcsum_ptcl_wrapper(@StoDLP_closeglobal,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP_closeglobal,uc.trlist,s,ptcl_cell,mu); % all particle to wall
-    A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
-    % [A22_dl,~,~] = srcsum_ptclself_wrapper(@StoDLP_closeglobal,uc.trlist,ptcl_cell,mu); % particle all to all DL
-    [A22_dl,~,~] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu); % particle all to all DL
+    A12 = srcsum_ptcl_wrapper(@StoDLP_closeglobal,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP_closeglobal,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    % A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    [A22_dl,~,~] = srcsum_ptclself_wrapper(@StoDLP_closeglobal,@StoDLP,uc.trlist,ptcl_cell,mu); % particle all to all DL
+    % [A22_dl,~,~] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu); % particle all to all DL
     % Near copies DL still contribute to traction.
     ptcl_l = ptcl_tot;
     ptcl_l.x = ptcl_tot.x + uc.trlist(1);
@@ -216,8 +224,8 @@ function E = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc)
     ptcl_l.x = ptcl_tot.x + uc.trlist(3); % hardcoded for 3 copies only
     [~,~,A22_dl_Tr] = StoDLP(ptcl_tot, ptcl_l, mu);
     % All 3 center copies SL contribute to traction
-    % [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP_closeglobal,uc.trlist,ptcl_cell,mu); % particle all to all SL
-    [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu); % particle all to all SL
+    [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP_closeglobal,@StoSLP,uc.trlist,ptcl_cell,mu); % particle all to all SL
+    % [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu); % particle all to all SL
     A22 = eye(2*numel(ptcl_tot.x))/2 + A22_dl + A22_sl; % ptcl all to all DL+SL+jump
     A = [A11 A12; A21 A22];
     
@@ -311,7 +319,7 @@ end
 % block structure [A11 A12 ...; A21 A22 ...] 
 % Necessary since SLP self eval uses fft so requires input as one enclosed
 % particle.
-function [U, P, T] = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
+function [U, P, T] = srcsum_ptclself_wrapper(kernel,kernel_self,trlist,ptcl_cell,mu)
     num_ptcl = numel(ptcl_cell);
     ptcl_tot = ptcl_cell{1};
     ptcl_idx = zeros(1,num_ptcl+1); % row of starting indices for each particle
@@ -334,11 +342,11 @@ function [U, P, T] = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
             if i==j
                 % ptcl_i self eval
                 if nargout == 1
-                    u = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                    u = srcsum(kernel_self,trlist,[],ptcl_i,ptcl_i,mu);
                 elseif nargout == 2
-                    [u, pres] = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                    [u, pres] = srcsum(kernel_self,trlist,[],ptcl_i,ptcl_i,mu);
                 elseif nargout == 3
-                    [u, pres, trac] = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                    [u, pres, trac] = srcsum(kernel_self,trlist,[],ptcl_i,ptcl_i,mu);
                 end
             else
                 ptcl_j = ptcl_cell{j};

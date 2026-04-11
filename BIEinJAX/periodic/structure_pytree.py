@@ -134,7 +134,7 @@ def gauss(N: int):
 def channel_wall_func(Z,N,*args):
     t = jnp.linspace(0, 2 * jnp.pi, N, endpoint=False)
     x = Z(t)
-    if args is not None:
+    if len(args) > 0:
         Zp = args[0]
         xp = Zp(t)
     else:
@@ -222,7 +222,7 @@ def proxy(R, perilen, N):
     P = {'x':x, 'xp':xp, 'nx':nx, 'ws':wt}
     return P
 
-def vis(x_, nx_, hold: bool  = False):
+def vis(x_, nx_, hold: bool  = False, show: bool = False):
     # Extract components for plotting
     x, y = jnp.real(x_), jnp.imag(x_)
     u, v = jnp.real(nx_), jnp.imag(nx_)
@@ -238,7 +238,7 @@ def vis(x_, nx_, hold: bool  = False):
     #     label = f"w={w:.2f}, cur={cur:.2f}, t={t:.1f}"
     #     plt.text(xi, yi, label, fontsize=8, ha='left', va='bottom')
 
-    if not hold:
+    if show:
         plt.axis('equal')
         plt.xlabel('Real part')
         plt.ylabel('Imag part')

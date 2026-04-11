@@ -11,7 +11,7 @@ function perivelpipe(expt)
     v=1;  % verbosity=0,1,2,3
     if nargin==0, expt='t'; end  % expt='t' test known soln, 'd' driven no-slip demo
     
-    N=100; % Note that 40 is too low for close-eval to be effective, should be ~300.
+    % N=100; % Note that 40 is too low for close-eval to be effective, should be ~300.
     % TODO: even at 300, certain values around edge still blows up.
     m=80;
     
@@ -31,7 +31,7 @@ function perivelpipe(expt)
     D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t); D.Zpp = @(t) - 0.3i*sin(t);
     
     % Panel based quadrature using GL grids, use axigeom functions
-    Num_panels = 40;
+    Num_panels = 10;
     p = 10; % order on panel
     N_perwall = p * Num_panels; qtype = 'p'; qntype = 'G'; 
     U.p = p; D.p = p;
@@ -61,11 +61,17 @@ function perivelpipe(expt)
     % inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0; 
     
     % Choco Dec 2025: add particle
-    Nptcl = 8;
-    ptcl.Z = @(t) 1 + 0.3*cos(t) + 1j*(0.3*sin(t)+0.25);
-    ptcl.Zp = @(t) - 0.3*sin(t) + 1j*0.3*cos(t);
-    ptcl.Zpp = @(t) - 0.3*cos(t) - 1j*0.3*sin(t);
+    Nptcl = 150;
+    num_ptcl = 2;
+    ptcl.Z = @(t) 1 + 0.2*cos(t) + 1j*(0.3*sin(t)+0.25);
+    ptcl.Zp = @(t) - 0.2*sin(t) + 1j*0.3*cos(t);
+    ptcl.Zpp = @(t) - 0.2*cos(t) - 1j*0.3*sin(t);
+    % ptcl.Z = @(t) 1 + 0.2*cos(t) + 1j*(0.3*sin(t)+0.25);
+    % ptcl.Zp = @(t) - 0.2*sin(t) + 1j*0.3*cos(t);
+    % ptcl.Zpp = @(t) - 0.2*cos(t) - 1j*0.3*sin(t);
     ptcl = setupquad(ptcl, Nptcl);
+    % ptcl = wobblycurve(0.2,0.1,5,Nptcl);
+    % ptcl.x = ptcl.x + 1+0.25j;
     ptcl.a = 1+0.25i; % a point in interior, use center. (needed for LapSLP close eval)
     % ptcl.nx = -ptcl.nx; ptcl.cur = -ptcl.cur; ptcl.xp = -ptcl.xp; ptcl.tang=-ptcl.tang; ptcl.cw=-ptcl.cw; % correct for sense of ptcl, opp from periodicdirpipe
     % Add geometric properties for near/far target separation (Choco Mar
@@ -73,22 +79,46 @@ function perivelpipe(expt)
     ptcl.xc = 1+0.25i;
     ptcl.max_r = 0.3;
 
-    ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
-    ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
-    ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
-    ptcl2 = setupquad(ptcl2, Nptcl);
-    ptcl2.a = 5; % a point in interior, use center. (needed for LapSLP close eval)
-    % ptcl2.nx = -ptcl2.nx; ptcl2.cur = -ptcl2.cur; ptcl2.xp = -ptcl2.xp; ptcl2.tang=-ptcl2.tang; ptcl2.cw=-ptcl2.cw; % correct for sense of ptcl, opp from periodicdirpipe
-    ptcl2.xc = 5;
-    ptcl2.max_r = 0.2;
+    % zt = [];
+    % % zt.x = ptcl.x(3:4) + 0.01 * ptcl.nx(3:4);
+    % zt.x = [2+1.2j;1+0.8j];
+    % zt.nx = [1+1j; 1+1j];
+    % mu = 0.7;
+    % [u, p, T] = StoDLP_closeglobal(zt, ptcl, mu, eye(2*numel(ptcl.x)), 'e');
+    % save("./ExpectedMatrices/stodl_global.mat",'u', 'p', 'T');
+    % [v, vp, vpp] = Cau_closeglobal(zt.x, ptcl, eye(numel(ptcl.x)), 'e');
+    % save("./ExpectedMatrices/cau_global.mat", 'v', 'vp','vpp');
+    % [v, dv1, dv2, ddv1, ddv12, ddv2] = LapSLP_closeglobal(zt, ptcl, eye(numel(ptcl.x)), 'e');
+    % save("./ExpectedMatrices/lapsl_global.mat", 'v', 'dv1','dv2', 'ddv1','ddv12','ddv2');
+    % [v, dv1, dv2] = LapDLP_closeglobal(zt, ptcl, eye(numel(ptcl.x)), 'e');
+    % save("./ExpectedMatrices/lapdl_global.mat", 'v', 'dv1','dv2');
+    % [u, p, T] = StoSLP_closeglobal(zt, ptcl, mu, eye(2*numel(ptcl.x)), 'e');
+    % save("./ExpectedMatrices/stosl_global.mat", 'u', 'p','T');
+    % [u,p,T] = StoDLP_closepanel(zt, s, mu, eye(2*numel(s.x)),'i');
+    % save("./ExpectedMatrices/stodl_panel.mat", 'u', 'p','T');
+
+    if num_ptcl > 1
+        ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
+        ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
+        ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
+        ptcl2 = setupquad(ptcl2, Nptcl);
+        ptcl2.a = 5; % a point in interior, use center. (needed for LapSLP close eval)
+        % ptcl2.nx = -ptcl2.nx; ptcl2.cur = -ptcl2.cur; ptcl2.xp = -ptcl2.xp; ptcl2.tang=-ptcl2.tang; ptcl2.cw=-ptcl2.cw; % correct for sense of ptcl, opp from periodicdirpipe
+        ptcl2.xc = 5;
+        ptcl2.max_r = 0.2;
+        % ptcl2.inside = @(z) abs(z-ptcl2.xc) < ptcl2.max_r;
+
+        ptcl_cell = {ptcl,ptcl2};
+        ptcl_tot = mergesegquads([ptcl,ptcl2]);
+        inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & abs(z-ptcl.xc)>ptcl.max_r & abs(z-ptcl2.xc)>ptcl2.max_r;
+    else
+        ptcl_cell = {ptcl};
+        ptcl_tot = ptcl;
+        inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & abs(z-ptcl.xc)>ptcl.max_r;
+    end
     
-    ptcl_cell = {ptcl,ptcl2};
-    ptcl_tot = mergesegquads([ptcl,ptcl2]);
-    
-    inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & abs(z-ptcl.xc)>ptcl.max_r & abs(z-ptcl2.xc)>ptcl2.max_r;
-    
-    % zt.x = [2+0.01i; 4+0.01i];    % point to test u soln at (expt='t' only)
-    zt.x = [(U.x(16) -0.005*U.nx(16)); (D.x(24)-0.005*D.nx(24))]; % 2nd panel from the right on U, 3rd panel from left on D
+    zt.x = [2+0.2i; 4+0.1i];    % point to test u soln at (expt='t' only)
+    % zt.x = [(U.x(16) -0.005*U.nx(16)); (D.x(24)-0.005*D.nx(24))]; % 2nd panel from the right on U, 3rd panel from left on D
     
     % set up left and right walls
     uc.nei = 1; % how many nei copies either side (use eg 1e3 to test A w/o AP)
@@ -112,8 +142,8 @@ function perivelpipe(expt)
     mu = 0.7;                                           % fluid viscosity
     if expt=='t' % Exact soln: either periodic or plus fixed pressure drop / period:
       % ue = @(x) [1+0*x; -2+0*x]; pe = @(x) 0*x; % the exact soln: uniform rigid flow, constant pressure everywhere (no drop)
-      % h=.2; ue = @(x) h*[imag(x).^2;0*x]; pe = @(x) h*2*mu*real(x); % horiz Poisseuil flow (has pres drop)
-      ue = @(x) [1+0*x;0.5+0*x]; pe = @(x) 0*x;
+      h=.2; ue = @(x) h*[imag(x).^2;0*x]; pe = @(x) h*2*mu*real(x); % horiz Poisseuil flow (has pres drop)
+      % ue = @(x) [1+0*x;0.5+0*x]; pe = @(x) 0*x;
       % disp('expt=t: running known Poisseuil flow BVP...')
       vrhs = ue(s.x);        % bdry vel data: NB ordering Ux,Dx,Uy,Dy !
       vrhs_ptcl = ue(ptcl_tot.x);
@@ -129,6 +159,7 @@ function perivelpipe(expt)
     % [E,A,B,C,Q] = ELSmatrix(s,p,proxyrep,mu,uc);                % fill
     % [E,A,B,C,Q] = ELSmatrix_sldl(s,ptcl,p,proxyrep,mu,uc); 
     [E,A,B,C,Q] = ELSmatrix_multi(s,ptcl_cell,P,proxyrep,mu,uc); 
+    save("mat_temp.mat",'A','B','C','Q');
     
     
     % %{
@@ -172,7 +203,7 @@ function perivelpipe(expt)
     
     
     if v   % plots
-        nx = 100; gx = 2*pi*((1:nx)-0.5)/nx; ny = nx; gy = gx - pi; % plotting grid
+        nx = 160; gx = 2*pi*((1:nx)-0.5)/nx; ny = nx; gy = gx - pi; % plotting grid
         % gy = 6.0/5.0 * (((1:ny)-0.5)/ny - 0.5); % Choco Jan2026: to avoid
         % near eval errors and visualize actual interior to sin pile.
         [xx yy] = meshgrid(gx,gy); t.x = xx(:)+1i*yy(:); Mt = numel(t.x);
@@ -205,6 +236,10 @@ function perivelpipe(expt)
         imagesc(gx,gy,log10(magvals)); % colormap(jet(256)); 
         colorbar; hold on; % Choco jan2026: plot magnitudes to see if no-slip was respected.
         quiver(gx,gy, u1,u2); 
+        [startX, startY] = meshgrid(gx(1:10:end), gy(1:10:end));
+        verts = stream2(gx,gy,u1,u2,startX,startY);
+        streamline(verts); 
+
         title('soln (u,p), with close-eval scheme')
         showsegment({U,D,ptcl_tot}); showsegment({L,R}); plot(zt.x,'go'); 
         
@@ -389,13 +424,14 @@ function [E A B C Q] = ELSmatrix_multi(s,ptcl_cell,p,proxyrep,mu,uc)
     end
     % Separate formulation for wall vs ptcl
     A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
+
     A12 = srcsum_ptcl_wrapper(@StoDLP_closeglobal,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP_closeglobal,uc.trlist,s,ptcl_cell,mu); % all particle to wall
     A21 = srcsum(@StoDLP_closepanel,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-    A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP_closeglobal,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP_closeglobal,uc.trlist,ptcl_cell,mu);
-    
+    A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP_closeglobal,@StoDLP,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP_closeglobal,@StoSLP,uc.trlist,ptcl_cell,mu);
+
     % A12 = srcsum_ptcl_wrapper(@StoDLP,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
     % A21 = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-    % A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu);
+    % A22 = eye(2*numel(ptcl_tot.x))/2 + srcsum_ptclself_wrapper(@StoDLP,@StoDLP,uc.trlist,ptcl_cell,mu) + srcsum_ptclself_wrapper(@StoSLP,@StoSLP,uc.trlist,ptcl_cell,mu);
     
     A = [A11 A12; A21 A22];
     
@@ -426,7 +462,7 @@ end
 % block structure [A11 A12 ...; A21 A22 ...] 
 % Necessary since SLP self eval uses fft so requires input as one enclosed
 % particle.
-function [U, P, T] = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
+function [U, P, T] = srcsum_ptclself_wrapper(kernel,kernel_self,trlist,ptcl_cell,mu)
     num_ptcl = numel(ptcl_cell);
     ptcl_tot = ptcl_cell{1};
     ptcl_idx = zeros(1,num_ptcl+1); % row of starting indices for each particle
@@ -449,11 +485,11 @@ function [U, P, T] = srcsum_ptclself_wrapper(kernel,trlist,ptcl_cell,mu)
             if i==j
                 % ptcl_i self eval
                 if nargout == 1
-                    u = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                    u = srcsum(kernel_self,trlist,[],ptcl_i,ptcl_i,mu);
                 elseif nargout == 2
-                    [u, pres] = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                    [u, pres] = srcsum(kernel_self,trlist,[],ptcl_i,ptcl_i,mu);
                 elseif nargout == 3
-                    [u, pres, trac] = srcsum(kernel,trlist,[],ptcl_i,ptcl_i,mu);
+                    [u, pres, trac] = srcsum(kernel_self,trlist,[],ptcl_i,ptcl_i,mu);
                 end
             else
                 ptcl_j = ptcl_cell{j};
