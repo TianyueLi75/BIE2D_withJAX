@@ -32,7 +32,7 @@ sys.path.append(peri_path)
 
 # jax.clear_caches()
 
-from periodic.structure_jax import channel_wall_func, channel_wall_glpanels
+from periodic.structure_jax import channel_wall_func, channel_wall_glpanels, gauss, interpmat, quadr_panf
 
 # ======================================================================
 # --- Laplace Single-Layer Potential -----------------------------------
@@ -782,7 +782,7 @@ def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu):
     
     # Convert real 2N-by-n density to complex N-by-n
     sigma_real = jnp.atleast_2d(sigma_real)
-    if sigma_real.shape[0] != N:
+    if sigma_real.shape[0] != 2*N:
         sigma_real = sigma_real.T
     sigma = sigma_real[:N, :] + 1j * sigma_real[N:, :]
 
@@ -846,7 +846,6 @@ def stoSLP_closeglobal(x, nx, sx, sxp, st, sa, sws, sigma_real, mu):
     
     return u, p, T
 
-# TODO: check T close eval.
 @jit
 def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu):
     """
@@ -864,7 +863,7 @@ def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu):
 
     # Compose complex density sigma from sigma_real = [real(sigma);imag(sigma)]
     sigma_real = jnp.atleast_2d(sigma_real)
-    if sigma_real.shape[0] != N:
+    if sigma_real.shape[0] != 2*N:
         sigma_real = sigma_real.T
     sigma = sigma_real[:N, :] + 1j * sigma_real[N:, :]
 
@@ -988,7 +987,6 @@ def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu):
     
     return u, p, T
 
-# TODO: T close panel implement and check.
 @jit
 def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu):
     """
@@ -1031,11 +1029,12 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu):
     # Holds (accumulated_velocity, accumulated_pressure)
     init_carry = (
         jnp.zeros((M, Nc), dtype=jnp.complex128), 
+        jnp.zeros((M, Nc), dtype=jnp.complex128),
         jnp.zeros((M, Nc), dtype=jnp.complex128)
     )
 
     def panel_contribution(carry, i):
-        u_acc, p_acc = carry
+        u_acc, p_acc, T_acc = carry
 
         # Extract panel data
         skx = sx_p[i]
@@ -1075,11 +1074,61 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu):
         
         u_close = I1 + I2 - I3 - I4
         p_close = -2 * mu * (L1 @ jnp.real(sigk) + L2 @ jnp.imag(sigk))
+        
+        # T close
+        # Upsample
+        be = 2
+        Imn = interpmat(len(skx), be)
+        [sfx, sfnx, sfws, sfwxp] = quadr_panf(skx, skwxp, Imn)
+        [Akf, L1f, L2f, A3f, A4f] = cau_closepanel(tx, sfx, sfwxp, slo, shi)
+
+        tx_col = jnp.reshape(tx,(-1, 1))
+        sx_row = jnp.reshape(sfx, (1, -1))
+        tnx_conj_col = jnp.reshape(jnp.conj(tnx), (-1, 1))
+        tnx_real_col = jnp.reshape(jnp.real(tnx), (-1, 1))
+        tnx_imag_col = jnp.reshape(jnp.imag(tnx), (-1, 1))
+        snx_ratio_row = jnp.reshape(jnp.conj(sfnx) / sfnx, (1, -1))
+        dx_mat = tx_col - sx_row
+        hx_core = jnp.real(dx_mat * tnx_conj_col)
+
+        Az = L1f - 1j * L2f
+        Az_ratio = Az * snx_ratio_row
+        Azz_r, Azz_i = A3f, -A4f
+        Az_r, Az_i   = L1f, -L2f
+        Azr_r, Azr_i = jnp.real(Az_ratio), jnp.imag(Az_ratio)
+    
+        T11 = (-4 * Azz_r * hx_core + 
+                Az_r * tnx_real_col - 
+                3 * Az_i * tnx_imag_col + 
+                Azr_r * tnx_real_col - 
+                Azr_i * tnx_imag_col)
+        T12 = (4 * Azz_i * hx_core - 
+            Az_r * tnx_imag_col + 
+            Az_i * tnx_real_col - 
+            Azr_r * tnx_imag_col - 
+            Azr_i * tnx_real_col)
+        T22 = (4 * Azz_r * hx_core + 
+            3 * Az_r * tnx_real_col - 
+            Az_i * tnx_imag_col - 
+            Azr_r * tnx_real_col + 
+            Azr_i * tnx_imag_col)
+        T11 = T11 @ Imn
+        T12 = T12 @ Imn
+        T22 = T22 @ Imn
+
+        sig_r = jnp.real(sigk)
+        sig_i = jnp.imag(sigk)
+        res_top = mu * (jnp.matmul(T11, sig_r) + jnp.matmul(T12, sig_i))
+        res_bot = mu * (jnp.matmul(T12, sig_r) + jnp.matmul(T22, sig_i))
+        
+        # T_close = jnp.concatenate([res_top, res_bot], axis=0)
+        T_close = res_top + 1j*res_bot
 
         # 3. Far Evaluation (Naive StoDLP)
         sigk_real = jnp.vstack([jnp.real(sigk),jnp.imag(sigk)])
-        [u_far, p_far, _] = StoDLP(tx, tnx, skx, sknx, skws, mu, sigk_real)
+        [u_far, p_far, T_far] = StoDLP(tx, tnx, skx, sknx, skws, mu, sigk_real)
         u_far_complex = u_far[:M,:] + 1j * u_far[M:,:]
+        T_far_complex = T_far[:M,:] + 1j * T_far[M:,:]
 
         # 4. Blend based on proximity
         # where(condition, if_true, if_false)
@@ -1087,19 +1136,23 @@ def stoDLP_closepanel(tx, tnx, sx, sxp, sws, scur, sxlo, sxhi, sigma_real, mu):
         # is_near = jnp.ones_like(is_near)
         u_panel = jnp.where(is_near[:, jnp.newaxis], u_close, u_far_complex)
         p_panel = jnp.where(is_near[:, jnp.newaxis], p_close, p_far)
+        T_panel = jnp.where(is_near[:, jnp.newaxis], T_close, T_far_complex)
 
         u_new = u_acc + u_panel
         p_new = p_acc + p_panel
+        T_new = T_acc + T_panel
         
-        return (u_new, p_new), None
+        return (u_new, p_new, T_new), None
 
     # Run the loop across all panels
-    (final_u_complex, final_p), _ = jax.lax.scan(panel_contribution, init_carry, jnp.arange(num_panels))
+    (final_u_complex, final_p, final_T_complex), _ = jax.lax.scan(panel_contribution, init_carry, jnp.arange(num_panels))
 
     # Convert back to real stacked notation [u_real; u_imag]
     A = jnp.concatenate([jnp.real(final_u_complex), jnp.imag(final_u_complex)], axis=0)
+
+    T = jnp.concatenate([jnp.real(final_T_complex), jnp.imag(final_T_complex)], axis=0)
     
-    return A, final_p
+    return A, final_p, T
 
 # ----------------------------------------------------------------------
 # --- Example / self-test ----------------------------------------------
@@ -1224,7 +1277,9 @@ def unit_test_close():
     # Compare with JAX
     print("Cau Diff from MATLAB: v: {:.3g}, dv1: {:.3g}, dv2: {:.3g}, ddv1: {:.3g}, ddv2: {:.3g}".format(jnp.linalg.norm(vwall_mat-v), jnp.linalg.norm(dv1wall_mat-dv1), jnp.linalg.norm(dv2wall_mat-dv2), jnp.linalg.norm(ddv1wall_mat-ddv1), jnp.linalg.norm(ddv2wall_mat-ddv2)))
 
-    tx = jnp.array([2+0.2j,1+0.8j])
+    # tx = jnp.array([2+0.2j,1+0.8j])
+    # tnx = jnp.array([1+1j,1+1j])
+    tx = ptx[2:4] + 0.01 * ptnx[2:4]
     tnx = jnp.array([1+1j,1+1j])
     # cau_closeglobal is less flexible than MATLAB version, so need always to input some form of density. 
     [v1,vp1,vpp1] = cau_closeglobal(tx,ptx,ptwxp,jnp.eye(ptx.shape[0]))
@@ -1271,24 +1326,26 @@ def unit_test_close():
     # Compare with JAX
     print("Stokes SL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p), jnp.linalg.norm(Tptcl_mat-T)))
 
-    [u,p,_] = stoDLP_closeglobal(tx,tnx,ptx,ptxp,ptwxp,sigma_real,mu)
+    [u,p,T] = stoDLP_closeglobal(tx,tnx,ptx,ptxp,ptwxp,sigma_real,mu)
     # load matlab matrix
     matlabMats = loadmat("../ExpectedMatrices/stodl_global.mat")
     uptcl_mat = jnp.array(matlabMats['u'])
     pptcl_mat = jnp.array(matlabMats['p'])
+    Tptcl_mat = jnp.array(matlabMats['T'])
     # Compare with JAX
-    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p)))
+    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p), jnp.linalg.norm(Tptcl_mat-T)))
 
     print("\n TEST 4: Stokes DLP panel based close eval. ")
     tx = jnp.array([2+1.2j,1+0.8j])
     sigma_real = jnp.eye(2*sx.shape[0])
-    [u,p] = stoDLP_closepanel(tx,tnx,sx,sxp,sws,scur,sxlo,sxhi,sigma_real,mu)
+    [u,p,T] = stoDLP_closepanel(tx,tnx,sx,sxp,sws,scur,sxlo,sxhi,sigma_real,mu)
     # load matlab matrix 
     matlabMats = loadmat("../ExpectedMatrices/stodl_panel.mat")
-    u_mat = jnp.array(matlabMats['A'])
-    p_mat = jnp.array(matlabMats['P'])
+    u_mat = jnp.array(matlabMats['u'])
+    p_mat = jnp.array(matlabMats['p'])
+    T_mat = jnp.array(matlabMats['T'])
     # Compare with JAX
-    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}".format(jnp.linalg.norm(u_mat-u), jnp.linalg.norm(p_mat-p)))
+    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:3g}".format(jnp.linalg.norm(u_mat-u), jnp.linalg.norm(p_mat-p), jnp.linalg.norm(T_mat-T)))
 
 
 

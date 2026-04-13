@@ -45,11 +45,11 @@ def get_vslip(B1, B2, ptcl_coords, ptcl_tang):
 # start_setup = time.perf_counter()
 
 # Set discretization parameters
-Np_wall = 10 # number of panels
+Np_wall = 20 # number of panels
 p_wall = 10 # GL grid order on each panel
 N_wall = Np_wall * p_wall # total number of discr. points on EACH wall
-N_ptcl = 100 # total number of discr. points on EACH particle (global quadr)
-N_obs = 100 # total number of global discr. points on EACH obstacle
+N_ptcl = 250 # total number of discr. points on EACH particle (global quadr)
+N_obs = 200 # total number of global discr. points on EACH obstacle
 N_side = 80
 N_prx = 2*N_side
 peri_len = 2*jnp.pi
@@ -90,11 +90,11 @@ if num_ptcl > 0:
         # Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.2*jnp.sin(t)+0.)
         # Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.2*jnp.cos(t)
         # Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.2*jnp.sin(t)
-        Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.1*jnp.sin(t)+0.)
+        Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.1*jnp.sin(t)-0.23)
         Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.1*jnp.cos(t)
         Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.1*jnp.sin(t)
         ptcl2 = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
-        ptcl2['a'] = 5+0j
+        ptcl2['a'] = 5-0.23j
         ptcl2['radius'] = 0.2
         ptcl_cell['ptcl_2'] = ptcl2
 

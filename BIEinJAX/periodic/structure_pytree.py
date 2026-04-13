@@ -7,6 +7,7 @@ Start date: March 18, 2026
 Most recent update: March 18, 2026
 """
 
+import jax
 from jax import lax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -126,6 +127,70 @@ def gauss(N: int):
     D = lax.map(compute_D_row, jnp.arange(N_nodes))
 
     return x, w, D
+
+def interpmat(n, be):
+    """
+    Interpolation matrix from n-pt to m-pt Gauss nodes.
+    n: original number of nodes
+    be: upsample scale
+    """
+    m = be * n # m: target number of nodes (m = be * n)
+
+    if n == m:
+        return jnp.eye(n)
+    
+    # Get nodes on [-1, 1]
+    x, _, _ = gauss(n)
+    y, _, _ = gauss(m)
+    
+    # Standard Vandermonde logic
+    # V_{ij} = x_i^{j-1}
+    V = jnp.vander(x, n, increasing=True)
+    # R_{ij} = y_i^{j-1}
+    R = jnp.vander(y, n, increasing=True)
+    
+    # Solve V.T @ P.T = R.T  => P = R @ inv(V)
+    # Using jax.scipy.linalg.solve for better stability than inv()
+    P = jax.scipy.linalg.solve(V.T, R.T).T
+    return P
+
+def quadr_panf(sk, Imn):
+    """
+    Upsamples a single panel's geometry.
+    sk: dictionary containing 'x', 'nx', etc. (size p)
+    be: upsampling factor (static integer)
+    Imn: precomputed interpolation matrix (shape: be*p, p)
+    """
+    p_fine = Imn.shape[0]
+    xf, wf, Df = gauss(p_fine)
+    
+    sf = {}
+    # Interpolate positions
+    sf['x'] = Imn @ sk['x']
+    
+    # In JAX, we usually differentiate using the spectral matrix Df 
+    # if we don't have the analytical Zp/Zpp functions handy.
+    # Note: Df is defined on [-1, 1], so we scale by (shi - slo)/2
+    # But since we are inside StoDLP_closepanel, we can derive it from sk['wxp']
+    
+    # Interpolate the complex speed weights/velocity
+    # Since sk['wxp'] = w * z', we extract z' = sk['wxp'] / w_coarse
+    _, w_coarse, _ = gauss(sk['x'].size)
+    zk_p = sk['wxp'] / w_coarse
+    
+    # Interpolate z' to the fine grid
+    z_fine_p = Imn @ zk_p
+    
+    # Derivatives for normals and curvature
+    # sf['xpp'] = Df @ z_fine_p * (scaling_factor_if_needed)
+    
+    sf['sp'] = jnp.abs(z_fine_p)
+    sf['tang'] = z_fine_p / sf['sp']
+    sf['nx'] = -1j * sf['tang']
+    sf['ws'] = wf * sf['sp']
+    sf['wxp'] = wf * z_fine_p
+    
+    return sf
 
 # -------------------------
 # Initialize a channel wall (combining init and setup steps)

@@ -29,7 +29,7 @@ peri_path = os.path.join(current_dir, '../periodic')
 sys.path.append(utils_path)
 sys.path.append(peri_path)
 
-from periodic.structure_pytree import channel_wall_func, channel_wall_glpanels
+from periodic.structure_pytree import channel_wall_func, channel_wall_glpanels, interpmat, quadr_panf
 
 # jax.clear_caches()
 
@@ -938,7 +938,7 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
         
         # 2. Close Evaluation (The "Dspecialquad" logic)
         # These functions (Ak, L1, L2) must also be JIT-compatible
-        [Ak, L1, L2, A3, A4] = cau_closepanel(t, sk, slo, shi, side)
+        [Ak, L1, L2, _, _] = cau_closepanel(t, sk, slo, shi, side)
         
         # I1: Undo n_y rotation and apply special quadrature
         tauf_x1 = sigk * (jnp.real(sknx) / sknx)[:, jnp.newaxis]
@@ -960,36 +960,46 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
         u_close = I1 + I2 - I3 - I4
         p_close = -2 * mu * (L1 @ jnp.real(sigk) + L2 @ jnp.imag(sigk))
         # T close
+
+        # Upsampling
+        be = 2
+        Imn = interpmat(len(skx), be)
+        sf = quadr_panf(sk, Imn)
+        [_, L1f, L2f, A3f, A4f] = cau_closepanel(t, sf, slo, shi, side)
         tx_col = jnp.reshape(t['x'],(-1, 1))
-        sx_row = jnp.reshape(sk['x'], (1, -1))
+        sx_row = jnp.reshape(sf['x'], (1, -1))
         tnx_conj_col = jnp.reshape(jnp.conj(t['nx']), (-1, 1))
         tnx_real_col = jnp.reshape(jnp.real(t['nx']), (-1, 1))
         tnx_imag_col = jnp.reshape(jnp.imag(t['nx']), (-1, 1))
-        snx_ratio_row = jnp.reshape(jnp.conj(sk['nx']) / sk['nx'], (1, -1))
+        snx_ratio_row = jnp.reshape(jnp.conj(sf['nx']) / sf['nx'], (1, -1))
         dx_mat = tx_col - sx_row
         hx_core = jnp.real(dx_mat * tnx_conj_col)
 
-        Az = L1 + 1j * L2
+        Az = L1f - 1j * L2f
         Az_ratio = Az * snx_ratio_row
-        Azz_r, Azz_i = A3, -A4
-        Az_r, Az_i   = L1, -L2
+        Azz_r, Azz_i = A3f, -A4f
+        Az_r, Az_i   = L1f, -L2f
         Azr_r, Azr_i = jnp.real(Az_ratio), jnp.imag(Az_ratio)
     
-        T11 = (-2 * Azz_r * hx_core + 
+        T11 = (-4 * Azz_r * hx_core + 
                 Az_r * tnx_real_col - 
                 3 * Az_i * tnx_imag_col + 
                 Azr_r * tnx_real_col - 
                 Azr_i * tnx_imag_col)
-        T12 = (2 * Azz_i * hx_core - 
+        T12 = (4 * Azz_i * hx_core - 
             Az_r * tnx_imag_col + 
             Az_i * tnx_real_col - 
             Azr_r * tnx_imag_col - 
             Azr_i * tnx_real_col)
-        T22 = (2 * Azz_r * hx_core + 
+        T22 = (4 * Azz_r * hx_core + 
             3 * Az_r * tnx_real_col - 
             Az_i * tnx_imag_col - 
             Azr_r * tnx_real_col + 
             Azr_i * tnx_imag_col)
+        T11 = T11 @ Imn
+        T12 = T12 @ Imn
+        T22 = T22 @ Imn
+
         sig_r = jnp.real(sigk)
         sig_i = jnp.imag(sigk)
         res_top = mu * (jnp.matmul(T11, sig_r) + jnp.matmul(T12, sig_i))
@@ -1206,11 +1216,11 @@ def unit_test_close():
     pptcl_mat = jnp.array(matlabMats['p'])
     Tptcl_mat = jnp.array(matlabMats['T'])
     # Compare with JAX
-    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p), jnp.linalg.norm(Tptcl_mat - T)))
+    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}".format(jnp.linalg.norm(uptcl_mat-u), jnp.linalg.norm(pptcl_mat-p), jnp.linalg.norm(Tptcl_mat - T)))
 
     print("\n TEST 4: Stokes DLP panel based close eval. ")
-    # tx = jnp.array([2+1.2j,1+0.8j])
-    # trg_wall = {'x':tx, 'nx':tnx}
+    tx = jnp.array([2+1.2j,1+0.8j])
+    trg_wall = {'x':tx, 'nx':tnx}
     sigma_real = jnp.eye(2*wallsrc['x'].shape[0])
     [u,p,T] = stoDLP_closepanel(trg_wall,wallsrc,mu,sigma_real,'i')
     # load matlab matrix 
@@ -1219,9 +1229,9 @@ def unit_test_close():
     p_mat = jnp.array(matlabMats['p'])
     T_mat = jnp.array(matlabMats['T'])
     # Compare with JAX
-    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}".format(jnp.linalg.norm(u_mat-u), jnp.linalg.norm(p_mat-p), jnp.linalg.norm(T_mat-T)))
+    print("Stokes DL Diff from MATLAB: u: {:.3g}, p: {:.3g}, T: {:.3g}".format(jnp.linalg.norm(u_mat-u), jnp.linalg.norm(p_mat-p), jnp.linalg.norm(T_mat-T)))
 
 
 if __name__ == "__main__":
-    # unit_test_far()
+    unit_test_far()
     unit_test_close()

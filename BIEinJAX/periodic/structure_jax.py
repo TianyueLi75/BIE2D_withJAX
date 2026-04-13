@@ -13,6 +13,7 @@ Author: Choco Li
 Date: 2025-11-10
 """
 
+import jax
 from jax.numpy.fft import fft, ifft
 # from jax import jit
 from jax import lax
@@ -34,6 +35,21 @@ def perispecdiff(f: jnp.ndarray) -> jnp.ndarray:
     fhat = jnp.fft.fft(f)
     df = jnp.fft.ifft(1j* k * fhat)
     return df
+
+# TODO; same as above when len(f) odd; should be better when len(f) even. Check.
+def perispecdiff_2(f):
+    N = f.shape[0]
+    if N % 2 == 0:
+        # wavenumber vector for even N
+        k = jnp.concatenate([jnp.arange(0, N//2), jnp.array([0]), jnp.arange(-N//2 + 1, 0)])
+    else:
+        k = jnp.concatenate([jnp.arange(0, (N-1)//2 + 1), jnp.arange(-(N-1)//2, 0)])
+        
+    if jnp.isrealobj(f):
+        return jnp.real(jnp.fft.ifft(1j * k * jnp.fft.fft(f)))
+    else:
+        return jnp.fft.ifft(1j * k * jnp.fft.fft(f))
+
 
 def gauss(N: int):
     """
@@ -121,6 +137,70 @@ def gauss(N: int):
     D = lax.map(compute_D_row, jnp.arange(N_nodes))
 
     return x, w, D
+
+def interpmat(n, be):
+    """
+    Interpolation matrix from n-pt to m-pt Gauss nodes.
+    n: original number of nodes
+    be: upsample scale
+    """
+    m = be * n # m: target number of nodes (m = be * n)
+
+    if n == m:
+        return jnp.eye(n)
+    
+    # Get nodes on [-1, 1]
+    x, _, _ = gauss(n)
+    y, _, _ = gauss(m)
+    
+    # Standard Vandermonde logic
+    # V_{ij} = x_i^{j-1}
+    V = jnp.vander(x, n, increasing=True)
+    # R_{ij} = y_i^{j-1}
+    R = jnp.vander(y, n, increasing=True)
+    
+    # Solve V.T @ P.T = R.T  => P = R @ inv(V)
+    # Using jax.scipy.linalg.solve for better stability than inv()
+    P = jax.scipy.linalg.solve(V.T, R.T).T
+    return P
+
+def quadr_panf(skx, skwxp, Imn):
+    """
+    Upsamples a single panel's geometry.
+    sk: dictionary containing 'x', 'nx', etc. (size p)
+    be: upsampling factor (static integer)
+    Imn: precomputed interpolation matrix (shape: be*p, p)
+    """
+    p_fine = Imn.shape[0]
+    xf, wf, Df = gauss(p_fine)
+    
+    # Interpolate positions
+    sfx = Imn @ skx
+    
+    # In JAX, we usually differentiate using the spectral matrix Df 
+    # if we don't have the analytical Zp/Zpp functions handy.
+    # Note: Df is defined on [-1, 1], so we scale by (shi - slo)/2
+    # But since we are inside StoDLP_closepanel, we can derive it from sk['wxp']
+    
+    # Interpolate the complex speed weights/velocity
+    # Since sk['wxp'] = w * z', we extract z' = sk['wxp'] / w_coarse
+    _, w_coarse, _ = gauss(skx.size)
+    zk_p = skwxp / w_coarse
+    
+    # Interpolate z' to the fine grid
+    z_fine_p = Imn @ zk_p
+    
+    # Derivatives for normals and curvature
+    # sf['xpp'] = Df @ z_fine_p * (scaling_factor_if_needed)
+    
+    sfsp = jnp.abs(z_fine_p)
+    sftang = z_fine_p / sfsp
+    sfnx = -1j * sftang
+    sfws = wf * sfsp
+    sfwxp = wf * z_fine_p
+    
+    return sfx, sfnx, sfws, sfwxp
+
 
 # -------------------------
 # Initialize a channel wall (combining init and setup steps)
@@ -224,7 +304,7 @@ def proxy(R, perilen, N):
     # wt = jnp.ones_like(x)
     return x, xp, nx, wt
 
-def vis(x_, nx_, hold: bool  = False):
+def vis(x_, nx_, hold: bool  = False, show: bool = False):
     # Extract components for plotting
     x, y = jnp.real(x_), jnp.imag(x_)
     u, v = jnp.real(nx_), jnp.imag(nx_)
@@ -240,7 +320,7 @@ def vis(x_, nx_, hold: bool  = False):
     #     label = f"w={w:.2f}, cur={cur:.2f}, t={t:.1f}"
     #     plt.text(xi, yi, label, fontsize=8, ha='left', va='bottom')
 
-    if not hold:
+    if show:
         plt.axis('equal')
         plt.xlabel('Real part')
         plt.ylabel('Imag part')
