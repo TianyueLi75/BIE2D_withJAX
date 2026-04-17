@@ -80,7 +80,7 @@ function perivelpipe(expt)
     ptcl.max_r = 0.3;
 
     % zt = [];
-    % % zt.x = ptcl.x(3:4) + 0.01 * ptcl.nx(3:4);
+    % zt.x = ptcl.x(3:4) + 0.01 * ptcl.nx(3:4);
     % zt.x = [2+1.2j;1+0.8j];
     % zt.nx = [1+1j; 1+1j];
     % mu = 0.7;

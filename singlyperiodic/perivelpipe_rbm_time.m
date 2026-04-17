@@ -1,20 +1,19 @@
 % singly-periodic in 2D velocity-BC Stokes BVP, ie "pipe" geom and
-% particles under rigid body motion. Choco 2/16/2026
+% particles under rigid body motion, TIME EVOLUTION Choco 4/15/2026
 
-Num_panels = 20;
+Num_panels = 10;
 p = 10; % order on panel
 N_perwall = p * Num_panels; qtype = 'p'; qntype = 'G'; 
-Nptcl = 400;
-Nlr = 80;
+Nptcl = 200;
+Nlr = 40;
 Nprx = 2*Nlr;    % # proxy pts (2 force comps per pt, so 2M dofs)
 
 % set up upper and lower walls
 uc.e1 = 2*pi;   % unitcell, e1=lattice vector as a complex number
 U.Z = @(t) 2*pi-t + 1i*(1+0.3*sin(2*pi-t)); U.Zp = @(t) -1 - 0.3i*cos(2*pi-t); U.Zpp = @(t) -0.3i*sin(2*pi-t);
-% U.Z = @(t) 2*pi-t + 1i; U.Zp = @(t) -1+0*t; U.Zpp = @(t) 0*t;
 D.Z = @(t) t + 1i*(-1+0.3*sin(t)); D.Zp = @(t) 1 + 0.3i*cos(t); D.Zpp = @(t) - 0.3i*sin(t);
+% U.Z = @(t) 2*pi-t + 1i; U.Zp = @(t) -1+0*t; U.Zpp = @(t) 0*t;
 % D.Z = @(t) t - 1i; D.Zp = @(t) 1+0*t; D.Zpp = @(t) 0*t;
-
 % Panel based quadrature using GL grids, use axigeom functions
 U.p = p; D.p = p;
 [U,~] = quadr(U, N_perwall, qtype, qntype); 
@@ -40,44 +39,24 @@ DX = @(x) x + 1i*(-1+0.3*sin(x));
 % UX = @(x) x + 1i;
 % DX = @(x) x - 1i;
 
-% ptcl.Z = @(t) 1 + 0.2*cos(t) + 1j*(0.3*sin(t)+0.25); % changed center to y=0 for symmetric setup (for debugging)
-% ptcl.Zp = @(t) - 0.2*sin(t) + 1j*0.3*cos(t);
-% ptcl.Zpp = @(t) - 0.2*cos(t) - 1j*0.3*sin(t);
-% NEW: ROTATED PARTICLE
-theta0 = pi/4;
-ptcl.Z = @(t) 0.3*cos(t)*cos(theta0) - 0.2*sin(t)*sin(theta0) + 1 ...
-            + 1j * (0.3*cos(t)*sin(theta0) + 0.2*sin(t)*cos(theta0) + 0.85);
-ptcl.Zp = @(t) -0.3*sin(t)*cos(theta0) - 0.2*cos(t)*sin(theta0) ...
-            + 1j * (-0.3*sin(t)*sin(theta0) + 0.2*cos(t)*cos(theta0));
-ptcl.Zpp = @(t) -0.3*cos(t)*cos(theta0) + 0.2*sin(t)*sin(theta0) ...
-            + 1j * (-0.3*cos(t)*sin(theta0) - 0.2*sin(t)*cos(theta0));
-% ==================
+theta0 = pi/7;
+a = 0.3; b = 0.2; % a = x-axis, b = y-axis
+% c1 = 1; c2 = 0.25; % center
+c1 = 1.; c2 = 0.15;
+ptcl.Z = @(t) a*cos(t)*cos(theta0) - b*sin(t)*sin(theta0) + c1 ...
+            + 1j * (a*cos(t)*sin(theta0) + b*sin(t)*cos(theta0) + c2);
+ptcl.Zp = @(t) -a*sin(t)*cos(theta0) - b*cos(t)*sin(theta0) ...
+            + 1j * (-a*sin(t)*sin(theta0) + b*cos(t)*cos(theta0));
+ptcl.Zpp = @(t) -a*cos(t)*cos(theta0) + b*sin(t)*sin(theta0) ...
+            + 1j * (-a*cos(t)*sin(theta0) - b*sin(t)*cos(theta0));
 ptcl = setupquad(ptcl, Nptcl);
 % ptcl = wobblycurve(0.2,0.1,5,Nptcl);
 % ptcl.x = ptcl.x + 1+0.25j;
-ptcl.a = 1+0.85j;
+ptcl.a = c1 + 1j*c2;
 ptcl.theta0 = theta0;
-
-% ptcl2.Z = @(t) 5 + 0.2*cos(t) + 1j*(0.2*sin(t)+0);
-% ptcl2.Zp = @(t) - 0.2*sin(t) + 1j*0.2*cos(t);
-% ptcl2.Zpp = @(t) - 0.2*cos(t) - 1j*0.2*sin(t);
-% ptcl2 = setupquad(ptcl2, Nptcl);
-% ptcl2.a = 5+0j;
-% ptcl_cell = {ptcl,ptcl2};
-
 ptcl_cell = {ptcl};
-
-% Collection of all panels on all particles
 ptcl_tot = ptcl;
-for ptcl_ind=2:numel(ptcl_cell)
-    ptcl_tot = mergesegquads([ptcl_tot, ptcl_cell{ptcl_ind}]);
-end
-% inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x))& ~inpolygon(real(z),imag(z),real(ptcl2.x),imag(ptcl2.x));
 inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x));
-% TODO: more generic "inside" function
-
-
-% zt.x = [2+0.2i; 4+0.1i];    % point to test u soln at
 
 % set up left and right walls
 L = []; R = [];
@@ -94,78 +73,175 @@ proxyrep = @StoSLP;      % sets proxy pt type via a kernel function call
 Rp = 1.1*2*pi; 
 P.x = pi + Rp*exp(2i*pi*(0:Nprx-1)'/Nprx); P = setupquad(P);     % proxy pts
 
-mu = 0.7;   % fluid viscosity
-vrhs = zeros(2*numel(s.x),1);
-
+mu = 0.9;   % fluid viscosity
 B1 = 1.23;
 B2 = -0.73;
-vrhs_ptcl_cplx = get_vslip(B1,B2,ptcl_cell); 
-vrhs_ptcl = [real(vrhs_ptcl_cplx); imag(vrhs_ptcl_cplx)];
-
-% % Plot setup
-figure; 
-% hold on; 
-% quiver(real(s.x), imag(s.x), real(s.nx), imag(s.nx));
-quiver(real(ptcl_tot.x), imag(ptcl_tot.x), real(vrhs_ptcl_cplx), imag(vrhs_ptcl_cplx));
-% quiver(real(L.x), imag(L.x), real(L.nx), imag(L.nx));
-% quiver(real(R.x), imag(R.x), real(R.nx), imag(R.nx));
-% plot(P.x,'*');
-% hold off;
-% % ==================================
-
 jump = 0;
-
-[E, A1, B1,C1,Q1] = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc); 
-
-Tjump = -jump * [real(R.nx);imag(R.nx)]; % traction driving growth (vector func)
-erhs = [vrhs; vrhs_ptcl; zeros(3*numel(ptcl_cell),1); zeros(2*Nlr,1);Tjump]; 
 
 warning('off','MATLAB:nearlySingularMatrix')  % backward-stable ill-cond is ok!
 warning('off','MATLAB:rankDeficientMatrix')
 lso.RECT = true;  % linsolve opts, forces QR even when square
-co = linsolve(E,erhs,lso);                           % direct bkw stable solve
-fprintf('resid norm = %.3g\n',norm(E*co - erhs))
-sig = co(1:2*numel(s.x)); 
-sig_ptcl = co(1+2*numel(s.x):2*numel(s.x)+2*numel(ptcl_tot.x));
-U_ptcl_all = co(2*numel(s.x)+2*numel(ptcl_tot.x) + 1 : 2*numel(s.x)+2*numel(ptcl_tot.x) + 2*numel(ptcl_cell)); % 2 U entries per ptcl
-Omega_ptcl_all = co(2*numel(s.x)+2*numel(ptcl_tot.x)+2*numel(ptcl_cell)+1:2*numel(s.x)+2*numel(ptcl_tot.x)+3*numel(ptcl_cell)); % 1 Omega entry per ptcl
-psi = co(2*numel(s.x)+2*numel(ptcl_tot.x)+3*numel(ptcl_cell)+1:end);
-fprintf('density norm = %.3g, ptcl density norm = %.3g, proxy norm = %.3g\n',norm(sig)/numel(sig), norm(sig_ptcl)/numel(sig_ptcl), norm(psi)/numel(psi));
-U_ptcl_all
-Omega_ptcl_all
-% [ut, pt] = evalsol(s,ptcl_tot,ptcl_cell,P,proxyrep,mu,uc,zt.x,co);
 
-nx = 160; 
-gx = 2*pi*((1:nx)-0.5)/nx; 
-ny = nx; 
-gy = gx - pi; % plotting grid
-% gy = 8*((1:ny)/ny-0.5);
-[xx yy] = meshgrid(gx,gy); t.x = xx(:)+1i*yy(:); Mt = numel(t.x);
-di = reshape(inside(t.x),size(xx));  % boolean if inside domain
-ug = nan(size([t.x;t.x])); pg = nan(size(t.x)); ii = inside(t.x);
-[ug([ii;ii]), pg(ii)] = evalsol(s,ptcl_tot,ptcl_cell,P,proxyrep,mu,uc,t.x(ii),co);
+dt = 0.4;
+T = 5;
+Nt = T / dt;
+M = struct('cdata',[],'colormap',[]);
+% figure_obj = figure('Visible', 'off');
+figure_obj = figure;
+for tstep=1:Nt
+    fprintf("\n Time step %d, ptcl at (%f,%f), angle = %f.\n", tstep, real(ptcl.a),imag(ptcl.a), ptcl.theta0);
 
-u1 = reshape(ug(1:Mt),size(xx)); u2 = reshape(ug(Mt+(1:Mt)),size(xx));
-pp = reshape(pg,size(xx)); pp = pp - pp(ceil(ny/2),1); % zero p mid left edge
-figure; 
-magvals = sqrt(u1.^2 + u2.^2);
-imagesc(gx,gy,log10(magvals)); % colormap(jet(256)); 
-colorbar; hold on; 
-% quiver(gx,gy, u1,u2,2); 
-[startX, startY] = meshgrid(gx(1:5:end), gy(1:5:end));
-verts = stream2(gx,gy,u1,u2,startX,startY);
-streamline(verts); 
-title('soln u, with close-eval scheme')
-% showsegment({U,D,ptcl_tot}); 
-% plot(U.x);
-% plot(D.x);
-plot(s.x(1:end/2));
-plot(s.x(1+end/2:end));
-for ptcl_ind=1:numel(ptcl_cell)
-    plot(ptcl_cell{ptcl_ind}.x);
+    vrhs = zeros(2*numel(s.x),1);
+    Tjump = -jump * [real(uc.R.nx);imag(uc.R.nx)]; % traction driving growth (vector func)
+    
+    vrhs_ptcl_cplx = get_vslip(B1,B2,ptcl_cell); 
+    vrhs_ptcl = [real(vrhs_ptcl_cplx); imag(vrhs_ptcl_cplx)];
+    erhs = [vrhs; vrhs_ptcl; zeros(3*numel(ptcl_cell),1); zeros(2*Nlr,1);Tjump]; 
+
+    [E, A, B,C,Q] = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc); 
+    co = linsolve(E,erhs,lso);                           % direct bkw stable solve
+    fprintf('resid norm = %.3g\n',norm(E*co - erhs))
+    sig = co(1:2*numel(s.x)); 
+    sig_ptcl = co(1+2*numel(s.x):2*numel(s.x)+2*numel(ptcl_tot.x));
+    U_ptcl_all = co(2*numel(s.x)+2*numel(ptcl_tot.x) + 1 : 2*numel(s.x)+2*numel(ptcl_tot.x) + 2*numel(ptcl_cell)); % 2 U entries per ptcl
+    Omega_ptcl_all = co(2*numel(s.x)+2*numel(ptcl_tot.x)+2*numel(ptcl_cell)+1:2*numel(s.x)+2*numel(ptcl_tot.x)+3*numel(ptcl_cell)); % 1 Omega entry per ptcl
+    psi = co(2*numel(s.x)+2*numel(ptcl_tot.x)+3*numel(ptcl_cell)+1:end);
+    fprintf('density norm = %.3g, ptcl density norm = %.3g, proxy norm = %.3g\n',norm(sig)/numel(sig), norm(sig_ptcl)/numel(sig_ptcl), norm(psi)/numel(psi));
+    fprintf("translation velocity: [%f, %f]; rotational: %f", U_ptcl_all(1), U_ptcl_all(2), Omega_ptcl_all(1));
+
+    % Plot current time step
+    nx = 100; gx = 2*pi*((1:nx)-0.5)/nx; ny = nx; 
+    gy = gx - pi; % plotting grid
+    % gy = 8*((1:ny)/ny-0.5);
+    gx = gx + real(uc.L.x(1)); % shift to start of current vis lens
+    [xx yy] = meshgrid(gx,gy); t.x = xx(:)+1i*yy(:); Mt = numel(t.x);
+    di = reshape(inside(t.x),size(xx));  % boolean if inside domain
+    ug = nan(size([t.x;t.x])); pg = nan(size(t.x)); ii = inside(t.x);
+    [ug([ii;ii]), pg(ii)] = evalsol(s,ptcl_tot,ptcl_cell,P,proxyrep,mu,uc,t.x(ii),co);
+   
+    clf;
+    hold on;
+    % xlim([real(uc.L.x(1)), real(uc.R.x(1))]);
+    xlim([0,4*pi]); % hardcoding the several periods for clear visualization
+    clim([-5,1]);
+    u1 = reshape(ug(1:Mt),size(xx)); u2 = reshape(ug(Mt+(1:Mt)),size(xx));
+    pp = reshape(pg,size(xx)); pp = pp - pp(ceil(ny/2),1); % zero p mid left edge
+    % figure; 
+    magvals = sqrt(u1.^2 + u2.^2);
+    imagesc(gx,gy,log10(magvals)); % colormap(jet(256)); 
+    colorbar;
+    % quiver(gx,gy, u1,u2,2); 
+    [startX, startY] = meshgrid(gx(1:5:end), gy(1:5:end));
+    verts = stream2(gx,gy,u1,u2,startX,startY);
+    streamline(verts); 
+    title('soln u, with close-eval scheme')
+    % showsegment({U,D,ptcl_tot}); 
+    plot(s.x(1:end/2));
+    plot(s.x(1+end/2:end));
+    for ptcl_ind=1:numel(ptcl_cell)
+        plot(ptcl_cell{ptcl_ind}.x);
+        % quiver(real(ptcl_cell{ptcl_ind}.a),imag(ptcl_cell{ptcl_ind}.a),
+        % cos(ptcl_cell{ptcl_ind}.theta0), sin(ptcl_cell{ptcl_ind}.theta0),
+        % 0.25, 'LineWidth', 2); % plot orientation vector, which at this
+        % point corresponds to direction of swimming.
+    end
+    showsegment({uc.L,uc.R}); 
+    % plot(zt.x,'go'); 
+    hold off;
+    drawnow;
+    M(tstep) = getframe(figure_obj);
+
+    % Update particle (hardcoded 1 particle)
+    theta0 = ptcl.theta0 + Omega_ptcl_all(1) * dt;
+    c1 = c1 + U_ptcl_all(1) * dt;
+    c2 = c2 + U_ptcl_all(2) * dt;
+    ptcl = [];
+    ptcl.Z = @(t) a*cos(t)*cos(theta0) - b*sin(t)*sin(theta0) + c1 ...
+                + 1j * (a*cos(t)*sin(theta0) + b*sin(t)*cos(theta0) + c2);
+    ptcl.Zp = @(t) -a*sin(t)*cos(theta0) - b*cos(t)*sin(theta0) ...
+                + 1j * (-a*sin(t)*sin(theta0) + b*cos(t)*cos(theta0));
+    ptcl.Zpp = @(t) -a*cos(t)*cos(theta0) + b*sin(t)*sin(theta0) ...
+                + 1j * (-a*cos(t)*sin(theta0) - b*sin(t)*cos(theta0));
+    ptcl = setupquad(ptcl, Nptcl);
+    ptcl.a = c1 + 1j*c2;
+    ptcl.theta0 = theta0;
+    ptcl_cell = {ptcl};
+    ptcl_tot = ptcl;
+    inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x));
+
+    % Check if any points on particle gets too close to walls
+    updown_buffer = 0.01;
+    touch_U = any(imag(UX(real(ptcl.x))-ptcl.x) < updown_buffer);
+    touch_D = any(imag(ptcl.x - DX(real(ptcl.x))) < updown_buffer);
+    if (touch_U || touch_D)
+        % Terminate for now. 
+        fprintf("\n terminating.");
+        % TODO: repulsive force update
+        break;
+    end
+
+    % Shift frame if getting too close to a inlet/outlet
+    inout_buffer = 0.2; % only shift half periods at a time, so can leave larger margin to shift.
+    touch_out = any(real(ptcl.x) > real(uc.R.x(1)) - inout_buffer);
+    touch_in = any(real(ptcl.x) < real(uc.L.x(1)) + inout_buffer);
+    if (touch_in)
+        % Shift left by half period
+        fprintf("\n Shifting window to the left by 3/4 period");
+        [U, D, s, uc, P] = update_geom(-3*uc.e1/4, U, D, N_perwall, uc, Nlr, P);
+    elseif touch_out
+        % Shift right by half period
+        fprintf("\n Shifting window to the right by 3/4 period");
+        [U, D, s, uc, P] = update_geom(3*uc.e1/4, U, D, N_perwall, uc, Nlr, P);
+    end
+
 end
-showsegment({L,R}); 
-% plot(zt.x,'go'); 
+
+% set(figure_obj, 'Visible', 'on');
+% movie(figure_obj, M, 2, 1);
+
+
+% Shifts wall by <pi_shift> from the (0,2pi) original period
+function [Unew, Dnew, s,uc,Pnew] = update_geom(pi_shift, U, D, N_perwall, uc, Nlr, P)
+    Unew = []; Dnew = [];
+    Unew.Z = @(t) U.Z(t-pi_shift);
+    Dnew.Z = @(t) D.Z(t+pi_shift);
+    Unew.Zp = @(t) U.Zp(t-pi_shift);
+    Dnew.Zp = @(t) D.Zp(t+pi_shift);
+    Unew.Zpp = @(t) U.Zpp(t-pi_shift);
+    Dnew.Zpp = @(t) D.Zpp(t+pi_shift);
+    Unew.p = U.p; Dnew.p = D.p;
+    [Unew,~] = quadr(Unew, N_perwall, 'p', 'G'); 
+    Unew.trlist = [-uc.e1,uc.e1];
+    Unew.tpan = [Unew.tlo;Unew.thi(end)];
+    Unew.cw = Unew.wxp; 
+    [Dnew,~] = quadr(Dnew, N_perwall, 'p', 'G'); 
+    Dnew.trlist = Unew.trlist;
+    Dnew.tpan = [Dnew.tlo;Dnew.thi(end)];
+    Dnew.cw = Dnew.wxp;
+    s = mergesegquads([Unew,Dnew]);
+    s.cw = [Unew.cw; Dnew.cw];
+    s.np = Unew.np + Dnew.np;
+    s.tlo = [Unew.tlo; Dnew.tlo];
+    s.thi = [Unew.thi; Dnew.thi];
+    s.xlo = [Unew.xlo; Dnew.xlo];
+    s.xhi = [Unew.xhi; Dnew.xhi];
+    s.ws = [Unew.ws; Dnew.ws];
+    s.wxp = [Unew.wxp; Dnew.wxp];
+    s.tpan = [Unew.tpan; Dnew.tpan];
+
+    L = [];
+    [x, w] = gauss(Nlr); x = (1+x)/2; w = w'/2; % quadr on [0,1]
+    H = Unew.x(end)-Dnew.x(1); L.x = Dnew.Z(0) + H*x; L.nx = 0*L.x+1; L.w = H*w; % left side
+    R = L; R.x = L.x+uc.e1; % right side
+    uc.L = L; uc.R = R;
+    
+    Pnew = P;
+    Pnew.x = P.x + pi_shift;
+
+end
+
+
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% end main %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
