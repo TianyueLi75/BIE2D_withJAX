@@ -6,10 +6,10 @@ p = 10; % order on panel
 qtype = 'p'; qntype = 'G';
 N_perwall = p*Num_panels;
 
-Nptcl = 120;
-mu=1.0;
+Nptcl = 50;
+mu=0.7;
 
-R = 10.;
+R = 1.;
 wall.Z = @(t) R*cos(t) + 1j*R*sin(t);
 wall.Zp = @(t) - R*sin(t) + 1j*R*cos(t);
 wall.Zpp = @(t) - R*cos(t) - 1j*R*sin(t);
@@ -59,9 +59,10 @@ end
 Emat = getEmat(wall, ptcl_cell, mu);
 
 % Mobility problem: solve for U and Omega
-B1 = 1;
-beta = 1; % beta < 0: pusher, beta > 0: puller; beta = 0: neutral
-B2 = beta * B1;
+B1 = 1.23;
+B2 = -0.73;
+% beta = 1; % beta < 0: pusher, beta > 0: puller; beta = 0: neutral
+% B2 = beta * B1;
 vslip_wall = zeros(2*numel(wall.x),1);
 vslip_ptcl = get_vslip(B1, B2, ptcl_cell);
 vslip_ptcl = [real(vslip_ptcl);imag(vslip_ptcl)];
@@ -74,6 +75,12 @@ Omega_z = Edens(2*(numel(wall.x) + numel(ptcl_tot.x) + numel(ptcl_cell))+1:end);
 fprintf("mag wall density = %.3g, ptcl density = %.3g.\n", norm(dens_wall)/numel(dens_wall), norm(dens_ptcl_tot)/numel(dens_ptcl_tot));
 U
 Omega_z
+
+zt = [];
+zt.x = [R*0.5+R*0.5j; -R*0.3-R*0.3j];
+ux = ptcl_wrapper(@StoSLP_closeglobal,zt,ptcl_cell,mu)*dens_ptcl_tot + ptcl_wrapper(@StoDLP_closeglobal,zt,ptcl_cell,mu) * dens_ptcl_tot;
+ux = ux + StoDLP_closepanel(zt,wall,mu,dens_wall,'i');
+ux
 
 % Plot: 
 nx = 100; gx = 2.5*((1:nx)/nx-0.5); 

@@ -894,6 +894,9 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
     """
     N = s['x'].size
     M = t['x'].size
+    # sigma_real = jnp.atleast_2d(sigma_real)
+    if len(sigma_real.shape) == 1:
+        sigma_real = sigma_real[:,None]
     Nc = sigma_real.shape[1]
     num_panels = s['xlo'].shape[0]
     p = N // num_panels # Nodes per panel
@@ -908,6 +911,8 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
     
     sigma = sigma_real[:N, :] + 1j * sigma_real[N:, :]
     sigma_p = sigma.reshape((num_panels, p, -1))
+
+    # jax.debug.print("shape of sigma_real after atleast_2d is {a}; shape of sigma cplx is {b}, shape of sigma_p = {c}", a=sigma_real.shape, b=sigma.shape, c=sigma_p.shape)
 
     # Initial state for the loop (The "Carry")
     # Holds (accumulated_velocity, accumulated_pressure)

@@ -19,7 +19,7 @@ wall.cw = wall.wxp;
 wall.a = 0+0j;
 
 theta0 = pi/4;
-a0 = 0.1; b0 = 0.1; % radii
+a0 = 0.1; b0 = 0.12; % radii
 c0 = 0.3; d0 = 0; % center
 ptcl.Z = @(t) a0*cos(t)*cos(theta0) - b0*sin(t)*sin(theta0) + c0 ...
             + 1j * (a0*cos(t)*sin(theta0) + b0*sin(t)*cos(theta0) + d0);
