@@ -3,3 +3,9 @@ ExpectedMatrices/*
 *.mat
 */jax-venv/*
 **/__pycache__/*
+.git/
+*.png
+*.gif
+*.mp4
+*.pdf
+*.zip

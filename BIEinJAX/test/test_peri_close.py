@@ -55,7 +55,7 @@ vis(sx, snx, True)
 
 # Add particle 
 num_ptcl = 2 # number of particles on the interior, for self eval.
-if num_ptcl:
+if num_ptcl>0:
     Z_ptcl = lambda t : 1 + 0.3*jnp.cos(t) + 1j*(0.3*jnp.sin(t)+0.25)
     Zp_ptcl = lambda t : - 0.3*jnp.sin(t) + 1j*0.3*jnp.cos(t)
     Zpp_ptcl = lambda t : - 0.3*jnp.cos(t) - 1j*0.3*jnp.sin(t)
@@ -63,24 +63,27 @@ if num_ptcl:
     ptwxp = 2*jnp.pi/N_ptcl * ptxp
     ptt = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
     pta = jnp.array([1+0.25j])
-    # Add another particle
-    Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.2*jnp.sin(t)+0.)
-    Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.2*jnp.cos(t)
-    Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.2*jnp.sin(t)
-    [ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
-    ptwxp2 = 2*jnp.pi/N_ptcl * ptxp2
-    ptt2 = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
-    pta2 = jnp.array([5+0j])
-    # Combine particle info, ASSUMES same discr on each ptcl!
-    # TODO later: can allow for differences if use vstack and pads. Will need to change ptcl all to all in that case.
-    ptx = jnp.concatenate([ptx,ptx2])
-    ptxp = jnp.concatenate([ptxp,ptxp2])
-    ptnx = jnp.concatenate([ptnx,ptnx2])
-    ptcur = jnp.concatenate([ptcur,ptcur2])
-    ptw = jnp.concatenate([ptw,ptw2])
-    ptt = jnp.concatenate([ptt,ptt2])
-    pta = jnp.concatenate([pta,pta2])
-    ptwxp = jnp.concatenate([ptwxp,ptwxp2])
+
+    if num_ptcl > 1:
+        # Add another particle
+        Z_ptcl = lambda t : 5 + 0.2*jnp.cos(t) + 1j*(0.2*jnp.sin(t)+0.)
+        Zp_ptcl = lambda t : - 0.2*jnp.sin(t) + 1j*0.2*jnp.cos(t)
+        Zpp_ptcl = lambda t : - 0.2*jnp.cos(t) - 1j*0.2*jnp.sin(t)
+        [ptx2,ptxp2,ptnx2,ptcur2,ptw2] = channel_wall_func(Z_ptcl,N_ptcl,Zp_ptcl, Zpp_ptcl)
+        ptwxp2 = 2*jnp.pi/N_ptcl * ptxp2
+        ptt2 = jnp.linspace(0, 2 * jnp.pi, N_ptcl, endpoint=False)
+        pta2 = jnp.array([5+0j])
+        # Combine particle info, ASSUMES same discr on each ptcl!
+        # TODO later: can allow for differences if use vstack and pads. Will need to change ptcl all to all in that case.
+        ptx = jnp.concatenate([ptx,ptx2])
+        ptxp = jnp.concatenate([ptxp,ptxp2])
+        ptnx = jnp.concatenate([ptnx,ptnx2])
+        ptcur = jnp.concatenate([ptcur,ptcur2])
+        ptw = jnp.concatenate([ptw,ptw2])
+        ptt = jnp.concatenate([ptt,ptt2])
+        pta = jnp.concatenate([pta,pta2])
+        ptwxp = jnp.concatenate([ptwxp,ptwxp2])
+
     vis(ptx, ptnx, True)
 else:
     ptx = jnp.array([])
@@ -197,7 +200,6 @@ if num_stokeslet:
     erhs = jnp.concatenate([vrhs_tot, jnp.zeros((2*N_side,)), Tjump, jnp.array([0]), jnp.array([0])]) # Add x- and y- force 0 constraint at the end.
 else:
     erhs = jnp.concatenate([vrhs_tot, jnp.zeros((2*N_side,)), Tjump])
-# 
 
 # Solve for density
 [edens, resid, _, _] = jnp.linalg.lstsq(E,erhs,rcond=1e-15)

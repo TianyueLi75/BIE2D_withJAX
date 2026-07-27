@@ -255,13 +255,13 @@ function E = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc)
     end
     % Source: wall.
     A11 = -eye(2*N)/2 + srcsum(@StoDLP,uc.trlist,[],s,s,mu); % Wall to wall
-    % [A21,~,A21_T] = srcsum(@StoDLP_closepanel,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
-    [A21,~,A21_T] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    [A21,~,A21_T] = srcsum(@StoDLP_closepanel,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
+    % [A21,~,A21_T] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,s,mu); % wall to ptcl
     % Source: particle.
-    % A12 = srcsum_ptcl_wrapper(@StoDLP_closeglobal,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP_closeglobal,uc.trlist,s,ptcl_cell,mu); % all particle to wall
-    A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
-    % [A22_dl,~,~] = srcsum_ptclself_wrapper(@StoDLP_closeglobal,uc.trlist,ptcl_cell,mu); % particle all to all DL
-    [A22_dl,~,~] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu); % particle all to all DL
+    A12 = srcsum_ptcl_wrapper(@StoDLP_closeglobal,uc.trlist,s,ptcl_cell,mu) + srcsum_ptcl_wrapper(@StoSLP_closeglobal,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    % A12 = srcsum(@StoDLP,uc.trlist,[],s,ptcl_tot,mu) + srcsum_ptcl_wrapper(@StoSLP,uc.trlist,s,ptcl_cell,mu); % all particle to wall
+    [A22_dl,~,~] = srcsum_ptclself_wrapper(@StoDLP_closeglobal,uc.trlist,ptcl_cell,mu); % particle all to all DL
+    % [A22_dl,~,~] = srcsum(@StoDLP,uc.trlist,[],ptcl_tot,ptcl_tot,mu); % particle all to all DL
     % Near copies DL still contribute to traction.
     ptcl_l = ptcl_tot;
     ptcl_l.x = ptcl_tot.x + uc.trlist(1);
@@ -269,8 +269,8 @@ function E = ELSmatrix_rbm(s,ptcl_cell,P,proxyrep,mu,uc)
     ptcl_l.x = ptcl_tot.x + uc.trlist(3); % hardcoded for 3 copies only
     [~,~,A22_dl_Tr] = StoDLP(ptcl_tot, ptcl_l, mu);
     % All 3 center copies SL contribute to traction
-    % [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP_closeglobal,uc.trlist,ptcl_cell,mu); % particle all to all SL
-    [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu); % particle all to all SL
+    [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP_closeglobal,uc.trlist,ptcl_cell,mu); % particle all to all SL
+    % [A22_sl,~,A22_slT] = srcsum_ptclself_wrapper(@StoSLP,uc.trlist,ptcl_cell,mu); % particle all to all SL
     A22 = eye(2*numel(ptcl_tot.x))/2 + A22_dl + A22_sl; % ptcl all to all DL+SL+jump
     A = [A11 A12; A21 A22];
     

@@ -17,6 +17,8 @@ wall.p = p;
 wall.tpan = [wall.tlo;wall.thi(end)];
 wall.cw = wall.wxp;
 wall.a = 0+0j;
+wall.type = 'container'; % tags the body kind for the generic collision resolver
+wall.R = R;              % circle radius, used by mindist_to_body for the container
 
 theta0 = pi/4;
 a0 = 0.1; b0 = 0.12; % radii
@@ -45,6 +47,8 @@ lso.RECT = true;  % linsolve opts, forces QR even when square
 dt = 0.1;
 T = 2;
 Nt = T / dt;
+buffer = 0.1*R;          % trigger sliding when a body is within this gap of the swimmer
+max_collision_iter = 20; % cap on the sliding-projection iterations (stop sim if reached)
 M = struct('cdata',[],'colormap',[]);
 figure_obj = figure('Visible', 'off');
 % figure_obj = figure;
@@ -109,10 +113,43 @@ for tstep=1:Nt
     drawnow;
     M(tstep) = getframe(figure_obj);
 
-    % Update particle (hardcoded 1 particle)
+    % ----------------------------------------------------------------
+    % Generic sliding collision resolution (wall + all obstacles).
+    % Computed BEFORE moving, using the swimmer at its current position.
+    % For every body within `buffer` that the swimmer is moving INTO,
+    % remove that normal velocity component (slide); iterate so the
+    % corrected velocity does not drive into any other body; cap the
+    % iterations and stop the simulation if the cap is reached.
+    % nhat points AWAY from the body, so (U.'*nhat) < 0 means approaching.
+    % ----------------------------------------------------------------
+    bodies = {wall}; % body list: container wall (append obstacles here when added)
+    Ucorr = U_ptcl_all;
+    resolved = false;
+    for it = 1:max_collision_iter
+        active = {};
+        for bi = 1:numel(bodies)
+            [dist, nhat] = mindist_to_body(ptcl, bodies{bi});
+            if dist < buffer && (Ucorr.' * nhat) < -1e-9 % within buffer AND moving in
+                active{end+1} = nhat; %#ok<SAGROW>
+            end
+        end
+        if isempty(active)
+            resolved = true; break;
+        end
+        fprintf("\n Collision buffer entered, removing normal (into-body) velocity.");
+        for k = 1:numel(active)
+            Ucorr = Ucorr - (Ucorr.' * active{k}) * active{k}; % slide
+        end
+    end
+    if ~resolved
+        warning('Max collision iterations (%d) reached without a collision-free velocity; stopping simulation.', max_collision_iter);
+        break;
+    end
+
+    % Update particle (hardcoded 1 particle) with the corrected velocity
     theta0 = ptcl.theta0 + Omega_ptcl_all(1) * dt;
-    c0 = c0 + U_ptcl_all(1) * dt;
-    d0 = d0 + U_ptcl_all(2) * dt;
+    c0 = c0 + Ucorr(1) * dt;
+    d0 = d0 + Ucorr(2) * dt;
     ptcl = [];
     ptcl.Z = @(t) a0*cos(t)*cos(theta0) - b0*sin(t)*sin(theta0) + c0 ...
                 + 1j * (a0*cos(t)*sin(theta0) + b0*sin(t)*cos(theta0) + d0);
@@ -123,41 +160,7 @@ for tstep=1:Nt
     ptcl = setupquad(ptcl, Nptcl);
     ptcl.a = c0 + 1j*d0;
     ptcl.theta0 = theta0;
-    
-    % Check if any points on particle gets too close to walls
-    buffer = 0.1*R;
-    touch_container = any(R - abs(ptcl.x-wall.a) < buffer); % true if any point closer to R than buffer
-    if (touch_container)
-        % Terminate for now. 
-        % fprintf("\n terminating.");
-        % break;
 
-        % Approach 1: remove normal component
-        fprintf("\n Almost touching container, remove normal velocity.")
-        % TODO: hardcoded one swimmer.
-        % Udir = U_ptcl_all / norm(U_ptcl_all);
-        Ndir = ptcl.a - wall.a; % outward normal for container (hardcoded circle) is vec{r} for ptcl center
-        if abs(Ndir) > 0
-            Ndir = Ndir / abs(Ndir);
-            Ndir = [real(Ndir); imag(Ndir)]; % normal 2D vector
-            Utang = U_ptcl_all - (U_ptcl_all.'*Ndir) * Ndir; % remove normal component
-        else
-            fprintf("\n ERROR: ptcl center and wall center overlaps, should not be touching container then.")
-        end
-        c0 = c0 - U_ptcl_all(1) * dt + Utang(1) * dt; % remove bad update, add in only tangential translation.
-        d0 = d0 - U_ptcl_all(2) * dt + Utang(2) * dt;
-        ptcl = [];
-        ptcl.Z = @(t) a0*cos(t)*cos(theta0) - b0*sin(t)*sin(theta0) + c0 ...
-                    + 1j * (a0*cos(t)*sin(theta0) + b0*sin(t)*cos(theta0) + d0);
-        ptcl.Zp = @(t) -a0*sin(t)*cos(theta0) - b0*cos(t)*sin(theta0) ...
-                    + 1j * (-a0*sin(t)*sin(theta0) + b0*cos(t)*cos(theta0));
-        ptcl.Zpp = @(t) -a0*cos(t)*cos(theta0) + b0*sin(t)*sin(theta0) ...
-                    + 1j * (-a0*cos(t)*sin(theta0) - b0*sin(t)*cos(theta0));
-        ptcl = setupquad(ptcl, Nptcl);
-        ptcl.a = c0 + 1j*d0;
-        ptcl.theta0 = theta0;
-    end
-    
     ptcl_cell = {ptcl};
     ptcl_tot = ptcl;
     inside = @(z) inpolygon(real(z),imag(z),real(wall.x),imag(wall.x));
@@ -179,6 +182,26 @@ writeVideo(v, M);
 close(v);
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% end main %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function [dist, nhat] = mindist_to_body(ptcl, body)
+% Min gap and collision normal from the swimmer to a body. nhat is a 2x1 unit
+% vector pointing AWAY from the body (toward the swimmer), so (U.'*nhat) < 0
+% means the velocity U drives the swimmer into the body.
+    if isfield(body,'type') && strcmp(body.type,'container')
+        % Circular container of radius body.R centered at body.a: per-node gap.
+        gaps = body.R - abs(ptcl.x - body.a);
+        [dist, i] = min(gaps);
+        d = ptcl.x(i) - body.a;
+        nhat = -[real(d); imag(d)] / abs(d); % toward centre = away from wall
+    else
+        % Generic obstacle: node-to-node minimum distance.
+        D = abs(ptcl.x(:) - body.x(:).');    % (Nptcl x Nbody)
+        [dist, idx] = min(D(:));
+        [ip, jb] = ind2sub(size(D), idx);
+        diff = ptcl.x(ip) - body.x(jb);
+        nhat = [real(diff); imag(diff)] / abs(diff); % from obstacle toward swimmer
+    end
+end
 
 function vslip_tot = get_vslip(B1,B2,ptcl_cell)
     vslip_tot = [];

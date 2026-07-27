@@ -36,8 +36,17 @@ s.wxp = [U.wxp; D.wxp];
 s.tpan = [U.tpan; D.tpan];
 UX = @(x) x + 1i*(1+0.3*sin(x)); % Functions in left-to-right orientation in x for target selecting
 DX = @(x) x + 1i*(-1+0.3*sin(x));
+UNX = @(x) -0.3*cos(x) + 1j;
+DNX = @(x) 0.3*cos(x) - 1j;
 % UX = @(x) x + 1i;
 % DX = @(x) x - 1i;
+
+% Body list for the generic sliding collision resolver: the upper and lower
+% pipe walls. Each body carries its graph-function X(x) and the unit direction
+% pointing AWAY from the wall into the domain (toward the swimmer), which is the
+% negated wall normal. Obstacles could be appended here with type 'obstacle'.
+wallU.type = 'periwall'; wallU.X = UX; wallU.NX_away = @(x) -UNX(x);
+wallD.type = 'periwall'; wallD.X = DX; wallD.NX_away = @(x) -DNX(x);
 
 theta0 = pi/7;
 a = 0.3; b = 0.2; % a = x-axis, b = y-axis
@@ -82,9 +91,11 @@ warning('off','MATLAB:nearlySingularMatrix')  % backward-stable ill-cond is ok!
 warning('off','MATLAB:rankDeficientMatrix')
 lso.RECT = true;  % linsolve opts, forces QR even when square
 
-dt = 0.4;
+dt = 0.1;
 T = 5;
 Nt = T / dt;
+buffer = 0.02;           % trigger sliding when a wall is within this gap of the swimmer
+max_collision_iter = 20; % cap on the sliding-projection iterations (stop sim if reached)
 M = struct('cdata',[],'colormap',[]);
 % figure_obj = figure('Visible', 'off');
 figure_obj = figure;
@@ -151,10 +162,43 @@ for tstep=1:Nt
     drawnow;
     M(tstep) = getframe(figure_obj);
 
-    % Update particle (hardcoded 1 particle)
+    % ----------------------------------------------------------------
+    % Generic sliding collision resolution (upper + lower pipe walls).
+    % Computed BEFORE moving, using the swimmer at its current position.
+    % For every wall within `buffer` that the swimmer is moving INTO,
+    % remove that normal velocity component (slide); iterate so the
+    % corrected velocity does not drive into any other wall; cap the
+    % iterations and stop the simulation if the cap is reached.
+    % nhat points AWAY from the wall, so (U.'*nhat) < 0 means approaching.
+    % ----------------------------------------------------------------
+    bodies = {wallU, wallD};
+    Ucorr = U_ptcl_all;
+    resolved = false;
+    for it = 1:max_collision_iter
+        active = {};
+        for bi = 1:numel(bodies)
+            [dist, nhat] = mindist_to_body(ptcl, bodies{bi});
+            if dist < buffer && (Ucorr.' * nhat) < -1e-9 % within buffer AND moving in
+                active{end+1} = nhat; %#ok<SAGROW>
+            end
+        end
+        if isempty(active)
+            resolved = true; break;
+        end
+        fprintf("\n Collision buffer entered, removing normal (into-wall) velocity.");
+        for k = 1:numel(active)
+            Ucorr = Ucorr - (Ucorr.' * active{k}) * active{k}; % slide
+        end
+    end
+    if ~resolved
+        warning('Max collision iterations (%d) reached without a collision-free velocity; stopping simulation.', max_collision_iter);
+        break;
+    end
+
+    % Update particle (hardcoded 1 particle) with the corrected velocity
     theta0 = ptcl.theta0 + Omega_ptcl_all(1) * dt;
-    c1 = c1 + U_ptcl_all(1) * dt;
-    c2 = c2 + U_ptcl_all(2) * dt;
+    c1 = c1 + Ucorr(1) * dt;
+    c2 = c2 + Ucorr(2) * dt;
     ptcl = [];
     ptcl.Z = @(t) a*cos(t)*cos(theta0) - b*sin(t)*sin(theta0) + c1 ...
                 + 1j * (a*cos(t)*sin(theta0) + b*sin(t)*cos(theta0) + c2);
@@ -165,20 +209,10 @@ for tstep=1:Nt
     ptcl = setupquad(ptcl, Nptcl);
     ptcl.a = c1 + 1j*c2;
     ptcl.theta0 = theta0;
+
     ptcl_cell = {ptcl};
     ptcl_tot = ptcl;
     inside = @(z) imag(z-DX(real(z)))>0 & imag(z-UX(real(z)))<0 & ~inpolygon(real(z),imag(z),real(ptcl.x),imag(ptcl.x));
-
-    % Check if any points on particle gets too close to walls
-    updown_buffer = 0.01;
-    touch_U = any(imag(UX(real(ptcl.x))-ptcl.x) < updown_buffer);
-    touch_D = any(imag(ptcl.x - DX(real(ptcl.x))) < updown_buffer);
-    if (touch_U || touch_D)
-        % Terminate for now. 
-        fprintf("\n terminating.");
-        % TODO: repulsive force update
-        break;
-    end
 
     % Shift frame if getting too close to a inlet/outlet
     inout_buffer = 0.2; % only shift half periods at a time, so can leave larger margin to shift.
@@ -244,6 +278,27 @@ end
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% end main %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function [dist, nhat] = mindist_to_body(ptcl, body)
+% Min gap and collision normal from the swimmer to a body. nhat is a 2x1 unit
+% vector pointing AWAY from the body (toward the swimmer), so (U.'*nhat) < 0
+% means the velocity U drives the swimmer into the body.
+    if isfield(body,'type') && strcmp(body.type,'periwall')
+        % Pipe wall given as a graph x -> body.X(x); the vertical gap is the
+        % contact proxy (the walls are gently-sloped graphs over x).
+        gaps = abs(imag(body.X(real(ptcl.x)) - ptcl.x));
+        [dist, i] = min(gaps);
+        nrm = body.NX_away(real(ptcl.x(i)));      % away-from-wall direction (complex)
+        nhat = [real(nrm); imag(nrm)] / abs(nrm);
+    else
+        % Generic obstacle: node-to-node minimum distance.
+        D = abs(ptcl.x(:) - body.x(:).');    % (Nptcl x Nbody)
+        [dist, idx] = min(D(:));
+        [ip, jb] = ind2sub(size(D), idx);
+        diff = ptcl.x(ip) - body.x(jb);
+        nhat = [real(diff); imag(diff)] / abs(diff); % from obstacle toward swimmer
+    end
+end
 
 function vslip_tot = get_vslip(B1,B2,ptcl_cell)
     vslip_tot = [];
