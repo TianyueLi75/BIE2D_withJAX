@@ -855,21 +855,124 @@ def stoDLP_closeglobal(t, s, mu, sigma_real, side='e', need_T=True):
     if not need_T:
         return u, p, None
 
-    # Traction close eval
-    # input to Cauchy integral for scaled and stable LapDLP_closeglobal
-    tau_T = jnp.eye(N)
-    taup = jax.vmap(perispecdiff, in_axes=1, out_axes=1)(tau_T)
+    # --- Traction close eval ---------------------------------------------
+    # Two routes to the same answer, chosen at trace time on the density width
+    # (see _dlpT_density_driven for the algebra).  Folding the density in first
+    # costs 8 Cauchy columns per density column; pushing the N-column identity
+    # through costs N.  Break-even is 8*ncol == N.
+    ncol = sigma.shape[1]
+    if 8 * ncol < N:
+        T = _dlpT_density_driven(t, s, mu, sigma)
+    else:
+        T = _dlpT_via_matrix(t, s, mu, sigma)
+
+    return u, p, T
+
+
+def _dlpT_cauchy_derivs(t, s, tau):
+    """
+    First and second Cauchy derivatives (Az, Azz) at the targets t of the scaled,
+    stable LapDLP_closeglobal holomorphic representation of the source density tau.
+
+    tau is (N, nc); the returned Az, Azz are (M, nc).  With tau = eye(N) these are
+    exactly the dense Az/Azz operator matrices, so the two traction routes below
+    differ only in whether the density is folded in before or after this call.
+    """
+    N = s['x'].size
+    taup = jax.vmap(perispecdiff, in_axes=1, out_axes=1)(tau)
     diff_mat = s['x'][:, None] - s['x'][None, :]
     # Avoid division by zero on diagonal for now
-    Y = 1.0 / (diff_mat + jnp.eye(N)) 
+    Y = 1.0 / (diff_mat + jnp.eye(N))
     Y = Y * s['wxp'][:, None] # include complex weights over columns
     # Set diagonal to -sum_{j != i} Y_{ij}
     diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=1)
     Y = Y * (1.0 - jnp.eye(N)) + jnp.diag(diag_vals)
     # vb = Y * tau / (-2i*pi) - tau' / (i*N)
-    vb = (Y.T @ tau_T) * (1.0 / (-2j * jnp.pi))
+    vb = (Y.T @ tau) * (1.0 / (-2j * jnp.pi))
     vb = vb - (1.0 / (1j * N)) * taup
     [_, Az, Azz] = cau_closeglobal(t, s, vb)
+    return Az, Azz
+
+
+def _dlpT_density_driven(t, s, mu, sigma):
+    """
+    DLP close-eval traction applied to sigma without ever forming the (2M, 2N)
+    operator, in O(M*N*nc) instead of O(M*N^2).
+
+    The only thing tying the T11/T12/T22 entries to *both* indices at once is
+
+        hx_core[i,j] = Re((t_i - s_j) conj(nx_i))
+                     = a_i - Re(nx_i) Re(s_j - z0) - Im(nx_i) Im(s_j - z0),
+                     a_i = Re((t_i - z0) conj(nx_i))
+
+    which is rank three: the i-dependence factors out of each of the three pieces.
+    So (Azz .* hx_core) @ d is a fixed combination of Azz applied to the three
+    densities {d, Re(s.x - z0)*d, Im(s.x - z0)*d}.  Every other term is already a plain
+    column scaling of Az, i.e. Az applied to d or to (conj(n)/n)*d.  Four densities
+    per real component of sigma, eight in all, replace the N-column identity.
+    """
+    # Split about the source centroid, not the origin: hx_core is a difference of
+    # positions, so referring both halves to z0 keeps each piece the same size as the
+    # quantity they reconstruct instead of the (arbitrarily large) absolute position.
+    z0 = jnp.mean(s['x'])
+    sr = jnp.real(s['x'] - z0)[:, None]
+    si = jnp.imag(s['x'] - z0)[:, None]
+    snx_ratio = (jnp.conj(s['nx']) / s['nx'])[:, None]
+
+    sig_r = jnp.real(sigma)
+    sig_i = jnp.imag(sigma)
+    nc = sigma.shape[1]
+
+    tau = jnp.concatenate([sig_r, sr * sig_r, si * sig_r, snx_ratio * sig_r,
+                           sig_i, sr * sig_i, si * sig_i, snx_ratio * sig_i], axis=1)
+    Az, Azz = _dlpT_cauchy_derivs(t, s, tau)
+
+    def blk(A, k):
+        return A[:, k * nc:(k + 1) * nc]
+
+    # Target-wise column vectors
+    a  = jnp.real((t['x'] - z0) * jnp.conj(t['nx']))[:, None]
+    nr = jnp.real(t['nx'])[:, None]
+    ni = jnp.imag(t['nx'])[:, None]
+
+    # H_ = (Azz .* hx_core) @ sig_, reassembled from the rank-three split of hx_core
+    Hr = a * blk(Azz, 0) - nr * blk(Azz, 1) - ni * blk(Azz, 2)
+    Hi = a * blk(Azz, 4) - nr * blk(Azz, 5) - ni * blk(Azz, 6)
+
+    # Az applied to sig_r / sig_i, and to the normal-ratio-weighted versions (Azr)
+    Az_r_, Azr_r_ = blk(Az, 0), blk(Az, 3)
+    Az_i_, Azr_i_ = blk(Az, 4), blk(Az, 7)
+
+    # T11 @ sig_r  +  T12 @ sig_i
+    res_top = mu * (
+        -2 * jnp.real(Hr)
+        + nr * jnp.real(Az_r_) - 3 * ni * jnp.imag(Az_r_)
+        + nr * jnp.real(Azr_r_) - ni * jnp.imag(Azr_r_)
+        + 2 * jnp.imag(Hi)
+        - ni * jnp.real(Az_i_) + nr * jnp.imag(Az_i_)
+        - ni * jnp.real(Azr_i_) - nr * jnp.imag(Azr_i_))
+
+    # T12 @ sig_r  +  T22 @ sig_i
+    res_bot = mu * (
+        2 * jnp.imag(Hr)
+        - ni * jnp.real(Az_r_) + nr * jnp.imag(Az_r_)
+        - ni * jnp.real(Azr_r_) - nr * jnp.imag(Azr_r_)
+        + 2 * jnp.real(Hi)
+        + 3 * nr * jnp.real(Az_i_) - ni * jnp.imag(Az_i_)
+        - nr * jnp.real(Azr_i_) + ni * jnp.imag(Azr_i_))
+
+    return jnp.concatenate([res_top, res_bot], axis=0)
+
+
+def _dlpT_via_matrix(t, s, mu, sigma):
+    """
+    DLP close-eval traction by forming the dense T11/T12/T22 blocks and then applying
+    them.  Costs O(M*N^2 + N^3) regardless of the density width, so it only pays off
+    when the density is wide -- notably the eye(2N) identity used to assemble the
+    operator, where the density-driven route would need 16N Cauchy columns.
+    """
+    N = s['x'].size
+    Az, Azz = _dlpT_cauchy_derivs(t, s, jnp.eye(N))
     # 1. Reshape for broadcasting (N, 1) and (1, M)
     tx_col = jnp.reshape(t['x'],(-1, 1))
     sx_row = jnp.reshape(s['x'], (1, -1))
@@ -922,12 +1025,10 @@ def stoDLP_closeglobal(t, s, mu, sigma_real, side='e', need_T=True):
     res_top = mu * (jnp.matmul(T11, sig_r) + jnp.matmul(T12, sig_i))
     res_bot = mu * (jnp.matmul(T12, sig_r) + jnp.matmul(T22, sig_i))
     
-    T = jnp.concatenate([res_top, res_bot], axis=0)
-    
-    return u, p, T
+    return jnp.concatenate([res_top, res_bot], axis=0)
 
-@partial(jit, static_argnums=(4))
-def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
+@partial(jit, static_argnums=(4,5))
+def stoDLP_closepanel(t, s, mu, sigma_real, side='i', need_T=True):
     """
     JIT-compatible version of StoDLP_closepanel.
     
@@ -1066,14 +1167,24 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
             Az_i * tnx_imag_col - 
             Azr_r * tnx_real_col + 
             Azr_i * tnx_imag_col)
-        T11 = T11 @ Imn
-        T12 = T12 @ Imn
-        T22 = T22 @ Imn
-
+        # T11/T12/T22 are (M, be*p) and must be contracted with Imn (be*p, p) and then
+        # with the density (p, Nc).  Association matters: downsampling first costs
+        # O(M be p p), folding the density in first costs O(M be p Nc).  Pick at trace
+        # time on the (static) density width, the same break-even test as the two
+        # _dlpT_* routes in stoDLP_closeglobal.
         sig_r = jnp.real(sigk)
         sig_i = jnp.imag(sigk)
-        res_top = mu * (jnp.matmul(T11, sig_r) + jnp.matmul(T12, sig_i))
-        res_bot = mu * (jnp.matmul(T12, sig_r) + jnp.matmul(T22, sig_i))
+        if Nc < p:
+            sig_r_f = Imn @ sig_r          # (be*p, Nc)
+            sig_i_f = Imn @ sig_i
+            res_top = mu * (jnp.matmul(T11, sig_r_f) + jnp.matmul(T12, sig_i_f))
+            res_bot = mu * (jnp.matmul(T12, sig_r_f) + jnp.matmul(T22, sig_i_f))
+        else:
+            T11 = T11 @ Imn
+            T12 = T12 @ Imn
+            T22 = T22 @ Imn
+            res_top = mu * (jnp.matmul(T11, sig_r) + jnp.matmul(T12, sig_i))
+            res_bot = mu * (jnp.matmul(T12, sig_r) + jnp.matmul(T22, sig_i))
         
         # T_close = jnp.concatenate([res_top, res_bot], axis=0)
         T_close = res_top + 1j*res_bot
