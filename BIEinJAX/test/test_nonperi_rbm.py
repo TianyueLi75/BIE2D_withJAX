@@ -51,6 +51,9 @@ mu = 0.7
 #   3 = Schur complement, eliminating the static wall+obstacle block first
 SOLVER_MODE = 1
 COMPARE_MODES = False # run all three and report timings + agreement
+# Check the matrix-free operator against the dense one, solve it with scipy GMRES on a
+# LinearOperator, and report timings for both routes.  See solve_gmres_matvec.
+TEST_MATVEC = True
 
 # Set up container
 R_container = 1.
@@ -261,5 +264,132 @@ edens_rbm = edens[:2*(N_nodes_wall+N_nodes_obs+N_nodes_ptcls)]
 [ut, pt] = evalsol_all(trg, s, obs_cell, ptcl_cell, mu, edens_rbm)
 
 jax.debug.print("ut = {a}, pt = {b}", a=ut, b=pt)
+
+
+# ---------------------------------------------------------------------------
+#  Matrix-free (matvec) operator + GMRES, checked against the dense solve
+#
+#  rbm_matvec_flat applies exactly the operator rbm_wrapper assembles, without ever
+#  forming it.  The first check below is the one that keeps the two implementations
+#  honest: if a term is ever added to rbm / rbm_obs and not to rbm_matvec /
+#  rbm_matvec_obs, matvec(v) stops matching E @ v and this fails.
+# ---------------------------------------------------------------------------
+def _matvec_report(tag, s_, obs_, ptcl_, mu_, rhs_, E_, blocks_, n_ptcl_, timing=False):
+    layout = rbm_dof_layout(s_, obs_, ptcl_)
+    assert layout['n_total'] == E_.shape[0], \
+        f'{tag}: layout says {layout["n_total"]} dofs, E is {E_.shape[0]}'
+    off_uom = layout['off_uom']
+
+    # --- 1. operator consistency: matvec(v) must equal E @ v ---
+    # Measured as a backward error, ||matvec(v) - E v||_inf / (||E||_inf ||v||_inf).
+    # Normalising by ||E v||_inf instead would be misleading: E is numerically
+    # singular, so for a solution vector carrying a large nullspace component E v is
+    # a near-total cancellation and any sane matvec would look inaccurate.
+    #
+    # The tolerance is 1e-11, not machine precision, because the two sides no longer
+    # do the same arithmetic: stoDLP_closeglobal's traction takes its density-driven
+    # route for the narrow densities of a matvec and its dense-matrix route for the
+    # eye(2N) of an assembly, and the two reorder the same sum differently.  They
+    # agree to ~1e-13 in backward error, which is two orders below the ~1e-10 error
+    # floor of the close-eval traction quadrature itself, so the gap is roundoff and
+    # not a discrepancy.  A genuinely missing term -- what this check exists to catch
+    # -- shows up at O(1), so the looser bound costs nothing.
+    E_scale = float(jnp.linalg.norm(E_, ord=jnp.inf))
+    rng = np.random.default_rng(0)
+    worst = 0.
+    for label, v in (('random vector', jnp.array(rng.standard_normal(layout['n_total']))),
+                     ('dense solution', solve_rbm_system(E_, blocks_, rhs_, mode=2)[0])):
+        ref = E_ @ v
+        got = rbm_matvec_flat(v, s_, obs_, ptcl_, mu_)
+        rel = float(jnp.max(jnp.abs(got - ref)) / (E_scale * jnp.max(jnp.abs(v))))
+        worst = max(worst, rel)
+        print(f'  {tag} matvec vs E@v [{label:15s}] backward err = {rel:.3e}')
+    assert worst < 1e-11, f'{tag}: matvec does not reproduce E (backward err {worst:.3e})'
+
+    # --- 2. GMRES on the matrix-free operator vs the dense solve ---
+    # make_rbm_linear_operator warms up the jit, so nothing timed below compiles.
+    op, matvec_fn, _ = make_rbm_linear_operator(s_, obs_, ptcl_, mu_)
+    [x_dense, resid_dense, _] = solve_rbm_system(E_, blocks_, rhs_, mode=2)
+    [x_g, resid_g, info_g, iters_g, _] = solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_, op=op)
+    d_uom = float(jnp.max(jnp.abs(x_g[off_uom:] - x_dense[off_uom:])))
+    d_dens = float(jnp.max(jnp.abs(x_g[:off_uom] - x_dense[:off_uom])))
+    u_g, _ = evalsol_all(trg, s_, obs_, ptcl_, mu_, x_g[:off_uom])
+    u_d, _ = evalsol_all(trg, s_, obs_, ptcl_, mu_, x_dense[:off_uom])
+    d_u = float(jnp.max(jnp.abs(u_g - u_d)))
+    print(f'  {tag} gmres: info = {info_g}, {iters_g} iters, ||A x - b|| = {resid_g:.3e}')
+    print(f'  {tag} vs dense: max|d UOmega| = {d_uom:.3e}, max|d u| = {d_u:.3e}')
+    print(f'  {tag} max|d dens| = {d_dens:.3e}  <- the wall-DL nullspace, generates no'
+          f' flow; not an error')
+    assert info_g == 0, f'{tag}: gmres did not converge (info {info_g})'
+    assert d_uom < 1e-8, f'{tag}: U/Omega disagree by {d_uom:.3e}'
+    assert d_u < 1e-8, f'{tag}: evaluated velocity disagrees by {d_u:.3e}'
+    print(f'  {tag} PASSED')
+    if not timing:
+        return
+
+    # --- 3. Timing: dense assembly + solve versus matrix-free GMRES ---
+    # Everything below has already been traced and compiled once, so these are
+    # steady-state numbers, not compile times.
+    def _time(f, reps=3):
+        f()  # untimed: everything here is already compiled, this just settles caches
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            r = f()
+            (r[0] if isinstance(r, tuple) else r).block_until_ready()
+        return (time.perf_counter() - t0) / reps
+
+    v_zero = jnp.zeros((layout['n_total'],))
+
+    t_assemble = _time(lambda: rbm_wrapper(s_, obs_, ptcl_, mu_))
+    t_direct = _time(lambda: solve_rbm_system(E_, blocks_, rhs_, mode=2)[0])
+    t_lstsq = _time(lambda: solve_rbm_system(E_, blocks_, rhs_, mode=1)[0])
+    t_matvec = _time(lambda: matvec_fn(v_zero), reps=10)
+    t0 = time.perf_counter()
+    solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_, op=op)
+    t_gmres = time.perf_counter() - t0
+
+    n = layout['n_total']
+    print(f'\n  --- timing, n = {n} unknowns (jit warmed up) ---')
+    print(f'  dense: assemble E          {t_assemble*1e3:9.2f} ms')
+    print(f'  dense: solve mode 2        {t_direct*1e3:9.2f} ms')
+    print(f'  dense: solve mode 1        {t_lstsq*1e3:9.2f} ms')
+    print(f'  dense TOTAL (assemble+2)   {(t_assemble+t_direct)*1e3:9.2f} ms')
+    print(f'  matrix-free: one matvec    {t_matvec*1e3:9.2f} ms'
+          f'   ({t_matvec/t_assemble*100:.0f}% of a full assembly)')
+    print(f'  matrix-free: gmres total   {t_gmres*1e3:9.2f} ms  ({iters_g} iters)')
+    print(f'  ratio matrix-free / dense  {t_gmres/(t_assemble+t_direct):9.2f} x')
+    print('  NOTE: a matvec is not 1/n of an assembly because the close-eval kernels do'
+          '\n        density-independent O(M*N) setup (panel Cauchy quadrature, spectral'
+          '\n        upsampling) on every apply, and GMRES redoes it every iteration.'
+          '\n        The matrix-free path wins on memory well before it wins on time:'
+          '\n        it never allocates the n x n operator.')
+
+
+if TEST_MATVEC:
+    print("\n========= MATRIX-FREE MATVEC + GMRES =========")
+    _matvec_report('[main]', s, obs_cell, ptcl_cell, mu, erhs, E, blocks, num_ptcl, timing=True)
+
+    # A second, self-contained case at reduced resolution so that rbm_matvec_obs is
+    # exercised on every run, whatever num_obs is set to above.
+    print("\n--- obstacle path (self-contained, independent of the knobs above) ---")
+    def _small_body(a, b, cx, cy, N):
+        Zb = lambda t : a*jnp.cos(t) + cx + 1j*(b*jnp.sin(t) + cy)
+        Zbp = lambda t : -a*jnp.sin(t) + 1j*(b*jnp.cos(t))
+        Zbpp = lambda t : -a*jnp.cos(t) + 1j*(-b*jnp.sin(t))
+        bd = channel_wall_func(Zb, N, Zbp, Zbpp)
+        bd['a'] = cx + 1j*cy; bd['theta0'] = 0.; bd['radius'] = max(a, b)
+        return bd
+    s_o = channel_wall_glpanels(Z_container, 6, 10, Zp_container, Zpp_container)
+    obs_o = {'obs_1': _small_body(0.1, 0.1, 0.35, 0.0, 50)}
+    ptcl_o = {'ptcl_1': _small_body(0.12, 0.1, 0.0, 0.15, 60)}
+    lay_o = rbm_dof_layout(s_o, obs_o, ptcl_o)
+    rhs_o = jnp.concatenate([jnp.zeros((lay_o['n_wall'] + lay_o['n_obs'],))]
+                            + [get_vslip(B1, B2, pt['x'], pt['nx']*1j) for pt in ptcl_o.values()]
+                            + [jnp.zeros((lay_o['n_uom'],))])
+    [E_o, _, _, _, blocks_o] = rbm_wrapper(s_o, obs_o, ptcl_o, mu)
+    _matvec_report('[obs]', s_o, obs_o, ptcl_o, mu, rhs_o, E_o, blocks_o, len(ptcl_o))
+
+    print("\nAll jitted entry points traced and compiled: rbm_wrapper, rbm_matvec_wrapper,"
+          "\nrbm_matvec_flat, evalsol_all, get_vslip.")
 
 plot_streamlines_total(edens_rbm, obs_cell, ptcl_cell, Xc_list, r_list, density=4)

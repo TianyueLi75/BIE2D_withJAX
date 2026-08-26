@@ -16,6 +16,8 @@ utils_path = os.path.join(current_dir, '..')
 # Add the folder to the system path
 sys.path.append(utils_path)
 from Sto_kernel_utils_pytree import *
+import numpy as np
+import scipy.sparse.linalg as spla
 
 def pair_block(src, trg, same_body, mu, need_T=True):
     """
@@ -331,6 +333,282 @@ def rbm_obs(s, obs_cell, ptcl_cell, mu, static=None):
     return E, bc_gamma_mat, intF, intT, blocks
 
 
+# =============================================================================
+#  Matrix-free (matvec) form of the same confined RBM operator
+#
+#  Everything below applies exactly the operator that rbm / rbm_obs assemble, one
+#  vector at a time, so that E never has to be formed.  Every term is a
+#  term-by-term mirror of the dense assembly above -- when one changes, so must
+#  the other, and test_nonperi_rbm.py checks matvec(v) == E @ v to enforce it.
+#
+#  Two shape conventions have to be respected here.  With a 1-D density the *self*
+#  quadrature path (StoSLPmat / StoDLPmat) returns a 1-D (2M,) array, but every
+#  close-eval path (stoSLP_closeglobal, stoDLP_closeglobal, stoDLP_closepanel)
+#  returns a 2-D (2M, 1) column.  Mixing the two broadcasts silently into a matrix,
+#  so every kernel result is jnp.ravel()-ed at the point of use.  Second, traction
+#  is only needed where the *target* is an active particle (it feeds the force and
+#  torque rows); everywhere else need_T=False keeps the close-eval kernels from
+#  doing their O(M*N^2) traction work.
+# =============================================================================
+
+def rbm_dof_layout(s, obs_cell, ptcl_cell):
+    """
+    Offsets and sizes of the extended unknown vector, in exactly the order the dense
+    E uses:
+
+        [ wall dens (2*Nw) | obs dens (2*Nobs) | ptcl dens (2*Nptcl) | UOmega (3*n_ptcl) ]
+
+    and, for the residual, the matching row order
+
+        [ wall vel | obs vel | ptcl vel | F (2*n_ptcl) | torque (n_ptcl) ].
+
+    Key insertion order of obs_cell / ptcl_cell defines the sub-block order, the same
+    contract body_grid relies on.
+    """
+    n_wall = 2 * s['x'].size
+    obs_sizes = [(k, 2 * obs_cell[k]['x'].size) for k in obs_cell]
+    ptcl_sizes = [(k, 2 * ptcl_cell[k]['x'].size) for k in ptcl_cell]
+    n_obs = sum(n for _, n in obs_sizes)
+    n_ptcl = sum(n for _, n in ptcl_sizes)
+    n_uom = 3 * len(ptcl_sizes)
+    return {'n_wall': n_wall, 'n_obs': n_obs, 'n_ptcl': n_ptcl, 'n_uom': n_uom,
+            'obs_sizes': obs_sizes, 'ptcl_sizes': ptcl_sizes,
+            'off_obs': n_wall, 'off_ptcl': n_wall + n_obs,
+            'off_uom': n_wall + n_obs + n_ptcl,
+            'n_total': n_wall + n_obs + n_ptcl + n_uom}
+
+
+def unpack_rbm_vector(x, s, obs_cell, ptcl_cell):
+    """Split a flat unknown vector into (s_dens, obs_dens_cell, ptcl_dens_cell, UOmega)."""
+    lay = rbm_dof_layout(s, obs_cell, ptcl_cell)
+    s_dens = x[:lay['n_wall']]
+    off = lay['off_obs']
+    obs_dens_cell = {}
+    for k, n in lay['obs_sizes']:
+        obs_dens_cell[k] = x[off:off + n]
+        off += n
+    ptcl_dens_cell = {}
+    for k, n in lay['ptcl_sizes']:
+        ptcl_dens_cell[k] = x[off:off + n]
+        off += n
+    return s_dens, obs_dens_cell, ptcl_dens_cell, x[off:off + lay['n_uom']]
+
+
+def pack_rbm_residual(s_vel, obs_vel, ptcl_vel, F, torque):
+    """Glue the matvec outputs back into E's row order."""
+    return jnp.concatenate([s_vel, obs_vel, ptcl_vel, F, torque])
+
+
+def pair_block_matvec(src, trg, src_dens, same_body, mu, need_T=True):
+    """
+    Matvec counterpart of pair_block: the SL+DL velocity (and traction) that
+    `src_dens` on body `src` generates on body `trg`.  `same_body` is a Python bool,
+    so only one branch is ever traced.  Returns 1-D (2*Ntrg,) arrays; the traction
+    slot is None when need_T is False.
+    """
+    if same_body:
+        res_sl, _, res_slT = StoSLP(src, src, mu, src_dens, self=True, near=False, panel=False, need_T=need_T)
+        # self-to-self DL traction vanishes, so it is never asked for here
+        res_dl, _, _ = StoDLP(src, src, mu, src_dens, self=True, near=False, panel=False, need_T=False)
+        u = jnp.ravel(res_sl) + jnp.ravel(res_dl)
+        return u, (jnp.ravel(res_slT) if need_T else None)
+    res_sl, _, res_sl_T = stoSLP_closeglobal(trg, src, mu, src_dens, 'e', need_T)
+    res_dl, _, res_dl_T = stoDLP_closeglobal(trg, src, mu, src_dens, 'e', need_T)
+    u = jnp.ravel(res_sl) + jnp.ravel(res_dl)
+    return u, (jnp.ravel(res_sl_T) + jnp.ravel(res_dl_T) if need_T else None)
+
+
+def body_grid_matvec(cell_j, cell_k, dens_j, mu, need_T=True):
+    """
+    Matvec counterpart of body_grid: for every target body in cell_k, sum the
+    contributions of every source body in cell_j, then concatenate over cell_k in key
+    order.  `dens_j` is keyed by the *source* cell.  No jump terms are included.
+    """
+    n_k = sum(2 * cell_k[k]['x'].size for k in cell_k)
+    if not cell_j or not cell_k:
+        zeros = jnp.zeros((n_k,))
+        return zeros, (zeros if need_T else None)
+    u_all = []
+    T_all = []
+    for key_k in cell_k.keys():
+        u_k = None
+        T_k = None
+        for key_j in cell_j.keys():
+            # Set-up of ptcl_cell and obs_cell makes sure keys won't overlap ('ptcl_1' vs 'obs_1', etc)
+            u_b, T_b = pair_block_matvec(cell_j[key_j], cell_k[key_k], dens_j[key_j],
+                                         key_j == key_k, mu, need_T)
+            u_k = u_b if u_k is None else u_k + u_b
+            if need_T:
+                T_k = T_b if T_k is None else T_k + T_b
+        u_all.append(u_k)
+        if need_T:
+            T_all.append(T_k)
+    return jnp.concatenate(u_all), (jnp.concatenate(T_all) if need_T else None)
+
+
+def _ptcl_rbm_and_loads(ptcl_cell, ptcl_dens_flat, UOmega, trac_static, T_p2p):
+    """
+    The two per-particle pieces of the matvec that involve no kernel evaluation.
+
+    1. The rigid-body-motion term.  In the dense assembly this is the bc_sqr block of
+       U/Omega columns, whose action on [Ux, Uy, Omega] is  -U - Omega x (x - xc).
+    2. The net-force / net-torque rows, which integrate the *total* traction on each
+       particle against ws and (-dy, dx) * ws.  Mirroring the dense
+       fMat_ptcl = -(-I/2 + T3) and fMat_W = -A21_T, the total traction is
+       -(trac_static + (-ptcl_dens/2 + T_p2p)).
+
+    `trac_static` is the traction the static group (wall, plus obstacles when
+    present) generates on the particles; `T_p2p` is the particle-particle traction
+    without its -1/2 SL jump.  All three inputs use the particle stacking: bodies
+    contiguous in ptcl_cell key order, x-components then y-components within a body.
+
+    Returns (bc_sqr, F, torque) with F ordered [Fx_1, Fy_1, Fx_2, Fy_2, ...].
+    """
+    trac_total = -(trac_static + (-ptcl_dens_flat / 2. + T_p2p))
+
+    bc_parts = []
+    F_parts = []
+    torque_parts = []
+    off = 0
+    for i, k in enumerate(ptcl_cell.keys()):
+        pt = ptcl_cell[k]
+        n = pt['x'].size
+        rel_pos = pt['x'] - jnp.mean(pt['x'])   # x - xc
+        dx = jnp.real(rel_pos)
+        dy = jnp.imag(rel_pos)
+
+        Ux, Uy, Om = UOmega[3 * i], UOmega[3 * i + 1], UOmega[3 * i + 2]
+        bc_parts.append(jnp.concatenate([-Ux - Om * dy, -Uy + Om * dx]))
+
+        trac_x = trac_total[off:off + n]
+        trac_y = trac_total[off + n:off + 2 * n]
+        F_parts.append(jnp.stack([jnp.dot(pt['ws'], trac_x), jnp.dot(pt['ws'], trac_y)]))
+        torque_parts.append(jnp.dot(-dy * pt['ws'], trac_x) + jnp.dot(dx * pt['ws'], trac_y))
+        off += 2 * n
+
+    if not F_parts:
+        empty = jnp.zeros((0,))
+        return empty, empty, empty
+    return (jnp.concatenate(bc_parts), jnp.concatenate(F_parts),
+            jnp.stack(torque_parts))
+
+
+@jit
+def rbm_matvec_wrapper(s, obs_cell, ptcl_cell, s_dens, obs_dens_cell, ptcl_dens_cell, UOmega, mu):
+    """
+    Apply the confined RBM operator to one set of densities plus (U, Omega).
+    Returns (s_vel, obs_vel, ptcl_vel, F, torque); obs_vel is empty when there are no
+    obstacles.  Dispatch mirrors rbm_wrapper.
+    """
+    if not obs_cell: # only active ptcl and channel
+        return rbm_matvec(s, ptcl_cell, s_dens, ptcl_dens_cell, UOmega, mu)
+    return rbm_matvec_obs(s, obs_cell, ptcl_cell, s_dens, obs_dens_cell, ptcl_dens_cell, UOmega, mu)
+
+
+@jit
+def rbm_matvec(s, ptcl_cell, s_dens, ptcl_dens_cell, UOmega, mu):
+    """
+    Matrix-free apply of the operator that `rbm` assembles: interior DL on the wall,
+    exterior SL+DL on each active particle, close evaluation on every non-self
+    interaction, extended by the force-free / torque-free rows.
+    """
+    ptcl_keys = list(ptcl_cell.keys())
+
+    # --- Wall rows: the -I/2 + D self block, plus SL+DL from every particle ---
+    s_vel = -s_dens / 2. + jnp.ravel(
+        StoDLP(s, s, mu, s_dens, self=True, near=False, panel=True, need_T=False)[0])
+    for k in ptcl_keys:
+        d = ptcl_dens_cell[k]
+        s_vel = s_vel \
+            + jnp.ravel(StoDLP(s, ptcl_cell[k], mu, d, self=False, near=True, panel=False, need_T=False)[0]) \
+            + jnp.ravel(StoSLP(s, ptcl_cell[k], mu, d, self=False, near=True, panel=False, need_T=False)[0])
+
+    # --- Wall to particle; its traction feeds the force/torque rows ---
+    A21_u = []
+    A21_T = []
+    for k in ptcl_keys:
+        u_k, _, T_k = StoDLP(ptcl_cell[k], s, mu, s_dens, self=False, near=True, panel=True, need_T=True)
+        A21_u.append(jnp.ravel(u_k))
+        A21_T.append(jnp.ravel(T_k))
+    ptcl_vel = jnp.concatenate(A21_u)
+    trac_static = jnp.concatenate(A21_T)
+
+    # --- FROM ptcl_j (with near) to ptcl_k, with the exterior SL+DL jump ---
+    u_p2p, T_p2p = body_grid_matvec(ptcl_cell, ptcl_cell, ptcl_dens_cell, mu, need_T=True)
+    ptcl_dens_flat = jnp.concatenate([ptcl_dens_cell[k] for k in ptcl_keys])
+    ptcl_vel = ptcl_vel + ptcl_dens_flat / 2. + u_p2p
+
+    # --- Rigid body motion in the b.c., and the net force / net torque rows ---
+    bc_sqr, F, torque = _ptcl_rbm_and_loads(ptcl_cell, ptcl_dens_flat, UOmega, trac_static, T_p2p)
+
+    return s_vel, jnp.zeros((0,)), ptcl_vel + bc_sqr, F, torque
+
+
+@jit
+def rbm_matvec_obs(s, obs_cell, ptcl_cell, s_dens, obs_dens_cell, ptcl_dens_cell, UOmega, mu):
+    """
+    Matrix-free apply of the operator that `rbm_obs` assembles: interior DL on the
+    wall, exterior SL+DL on the passive obstacles and on the active particles, close
+    evaluation on every non-self interaction, extended by the force-free /
+    torque-free rows.
+    """
+    obs_keys = list(obs_cell.keys())
+    ptcl_keys = list(ptcl_cell.keys())
+
+    # --- Wall rows: -I/2 + D self block, plus SL+DL from every obstacle and particle ---
+    s_vel = -s_dens / 2. + jnp.ravel(
+        StoDLP(s, s, mu, s_dens, self=True, near=False, panel=True, need_T=False)[0])
+    for cell, dens_cell in ((obs_cell, obs_dens_cell), (ptcl_cell, ptcl_dens_cell)):
+        for k in cell.keys():
+            d = dens_cell[k]
+            s_vel = s_vel \
+                + jnp.ravel(StoDLP(s, cell[k], mu, d, self=False, near=True, panel=False, need_T=False)[0]) \
+                + jnp.ravel(StoSLP(s, cell[k], mu, d, self=False, near=True, panel=False, need_T=False)[0])
+
+    # --- Obstacle rows: wall to obstacle, obstacle self group with jump, particles to obstacle ---
+    obs_vel = jnp.concatenate([
+        jnp.ravel(StoDLP(obs_cell[k], s, mu, s_dens, self=False, near=True, panel=True, need_T=False)[0])
+        for k in obs_keys])
+    obs_dens_flat = jnp.concatenate([obs_dens_cell[k] for k in obs_keys])
+    u_o2o, _ = body_grid_matvec(obs_cell, obs_cell, obs_dens_cell, mu, need_T=False)
+    u_p2o, _ = body_grid_matvec(ptcl_cell, obs_cell, ptcl_dens_cell, mu, need_T=False)
+    obs_vel = obs_vel + obs_dens_flat / 2. + u_o2o + u_p2o
+
+    # --- Wall to particle; its traction feeds the force/torque rows ---
+    A21_u = []
+    A21_T = []
+    for k in ptcl_keys:
+        u_k, _, T_k = StoDLP(ptcl_cell[k], s, mu, s_dens, self=False, near=True, panel=True, need_T=True)
+        A21_u.append(jnp.ravel(u_k))
+        A21_T.append(jnp.ravel(T_k))
+    ptcl_vel = jnp.concatenate(A21_u)
+
+    # --- Body-body couplings involving the active particles ---
+    u_o2p, T_o2p = body_grid_matvec(obs_cell, ptcl_cell, obs_dens_cell, mu, need_T=True)
+    u_p2p, T_p2p = body_grid_matvec(ptcl_cell, ptcl_cell, ptcl_dens_cell, mu, need_T=True)
+    ptcl_dens_flat = jnp.concatenate([ptcl_dens_cell[k] for k in ptcl_keys])
+    ptcl_vel = ptcl_vel + u_o2p + ptcl_dens_flat / 2. + u_p2p
+
+    # The static group here is wall + obstacles, matching fMat_W = [fMat_wall, fMat_obs]
+    trac_static = jnp.concatenate(A21_T) + T_o2p
+
+    # --- Rigid body motion in the b.c., and the net force / net torque rows ---
+    bc_sqr, F, torque = _ptcl_rbm_and_loads(ptcl_cell, ptcl_dens_flat, UOmega, trac_static, T_p2p)
+
+    return s_vel, obs_vel, ptcl_vel + bc_sqr, F, torque
+
+
+@jit
+def rbm_matvec_flat(x, s, obs_cell, ptcl_cell, mu):
+    """
+    The whole operator as a flat vector -> flat vector map, equal to E @ x for the E
+    that rbm_wrapper assembles.  This is the single jitted entry point that the
+    scipy LinearOperator below wraps.
+    """
+    s_dens, obs_dens_cell, ptcl_dens_cell, UOmega = unpack_rbm_vector(x, s, obs_cell, ptcl_cell)
+    s_vel, obs_vel, ptcl_vel, F, torque = rbm_matvec_wrapper(
+        s, obs_cell, ptcl_cell, s_dens, obs_dens_cell, ptcl_dens_cell, UOmega, mu)
+    return pack_rbm_residual(s_vel, obs_vel, ptcl_vel, F, torque)
 
 
 @jit
@@ -485,3 +763,80 @@ def solve_rbm_system(E, blocks, rhs, mode=1, static_fac=None, rcond=1e-15):
     elif mode == 3:
         return solve_schur(blocks, rhs, static_fac=static_fac, rcond=rcond)
     raise ValueError(f"unknown solver mode {mode}, expected 1, 2 or 3")
+
+
+# =============================================================================
+#  Matrix-free GMRES solve
+#
+#  Deliberately kept out of solve_rbm_system: that function dispatches between
+#  three factorizations of an *assembled* E, while this one never forms E at all.
+#  It drives rbm_matvec_flat through a scipy LinearOperator.
+#
+#  A note on conditioning.  E is numerically singular -- the interior-Dirichlet DL
+#  wall operator carries the classical rank-one normal-vector nullspace, so
+#  cond(E) ~ 1e17 -- but the right-hand side is consistent and that nullspace
+#  generates no flow, so GMRES converges without any preconditioner or completion
+#  term.  The density it returns can differ from the dense solution by a multiple of
+#  that nullspace; U/Omega and the evaluated velocity field are the quantities that
+#  must agree, and they do.
+# =============================================================================
+
+def make_rbm_linear_operator(s, obs_cell, ptcl_cell, mu, warmup=True):
+    """
+    Wrap rbm_matvec_flat for this geometry as a scipy LinearOperator.
+
+    Returns (op, fn, layout).  `fn` is the jax-in/jax-out apply, useful for timing a
+    bare matvec or for checking against a dense E; `layout` is the rbm_dof_layout dict.
+    With warmup=True the operator is traced and compiled before returning, so nothing
+    timed afterwards includes compilation.
+
+    `fn` closes over the *module-level* jitted rbm_matvec_flat rather than wrapping a
+    fresh lambda in jit here.  A fresh lambda is a new callable with its own empty cache,
+    so every operator built for a new swimmer pose would retrace and recompile the whole
+    operator -- which is exactly what a time loop does.  Going through the shared jit
+    keeps one cache entry per discretization, and the geometry dicts are pytree arguments
+    whose shapes do not change as a body moves, so later poses hit it.
+    """
+    layout = rbm_dof_layout(s, obs_cell, ptcl_cell)
+    n = layout['n_total']
+    def fn(x):
+        return rbm_matvec_flat(x, s, obs_cell, ptcl_cell, mu)
+    if warmup:
+        fn(jnp.zeros((n,))).block_until_ready()
+
+    def mv(v):
+        # np.asarray on a jax array returns a read-only view, and scipy's gmres
+        # writes into the vector it gets back -- so copy on the way out.
+        return np.array(fn(jnp.asarray(np.asarray(v, dtype=np.float64).ravel())),
+                        dtype=np.float64, copy=True)
+
+    return spla.LinearOperator((n, n), matvec=mv, dtype=np.float64), fn, layout
+
+
+def solve_gmres_matvec(s, obs_cell, ptcl_cell, mu, rhs, rtol=1e-12, atol=0.0,
+                       restart=200, maxiter=20, x0=None, op=None, warmup=True):
+    """
+    Solve the extended RBM system with GMRES on the matrix-free operator.
+
+    Interchangeable with solve_rbm_system as far as the answer goes, but takes the
+    geometry instead of an assembled E.  Pass a prebuilt `op` from
+    make_rbm_linear_operator to reuse a compiled apply across solves (and to keep
+    compilation out of a timing loop).
+
+    Returns (x, resid, info, n_iter, op) with x a jax array, resid = ||A x - rhs||
+    measured with the same matvec, and info the scipy convergence flag (0 = success).
+    """
+    if op is None:
+        op, _, _ = make_rbm_linear_operator(s, obs_cell, ptcl_cell, mu, warmup=warmup)
+    b = np.asarray(rhs, dtype=np.float64).ravel()
+
+    n_iter = [0]
+    def _count(_):
+        n_iter[0] += 1
+
+    x, info = spla.gmres(op, b,
+                         x0=None if x0 is None else np.asarray(x0, dtype=np.float64).ravel(),
+                         rtol=rtol, atol=atol, restart=restart, maxiter=maxiter,
+                         callback=_count, callback_type='pr_norm')
+    resid = float(np.linalg.norm(op.matvec(x) - b))
+    return jnp.asarray(x), resid, info, n_iter[0], op
