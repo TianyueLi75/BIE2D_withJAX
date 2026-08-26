@@ -310,13 +310,20 @@ def _matvec_report(tag, s_, obs_, ptcl_, mu_, rhs_, E_, blocks_, n_ptcl_, timing
     # make_rbm_linear_operator warms up the jit, so nothing timed below compiles.
     op, matvec_fn, _ = make_rbm_linear_operator(s_, obs_, ptcl_, mu_)
     [x_dense, resid_dense, _] = solve_rbm_system(E_, blocks_, rhs_, mode=2)
-    [x_g, resid_g, info_g, iters_g, _] = solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_, op=op)
+    # Preconditioned by default (block-Jacobi over the self-interaction blocks); the
+    # unpreconditioned run is kept alongside it so the iteration counts stay visible.
+    pc_ = rbm_block_jacobi(s_, obs_, ptcl_, mu_)
+    [x_g, resid_g, info_g, iters_g, _] = solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_,
+                                                            op=op, pc=pc_)
+    [_, _, info_np, iters_np, _] = solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_,
+                                                      op=op, precond=False)
     d_uom = float(jnp.max(jnp.abs(x_g[off_uom:] - x_dense[off_uom:])))
     d_dens = float(jnp.max(jnp.abs(x_g[:off_uom] - x_dense[:off_uom])))
     u_g, _ = evalsol_all(trg, s_, obs_, ptcl_, mu_, x_g[:off_uom])
     u_d, _ = evalsol_all(trg, s_, obs_, ptcl_, mu_, x_dense[:off_uom])
     d_u = float(jnp.max(jnp.abs(u_g - u_d)))
-    print(f'  {tag} gmres: info = {info_g}, {iters_g} iters, ||A x - b|| = {resid_g:.3e}')
+    print(f'  {tag} gmres: info = {info_g}, {iters_g} iters, ||A x - b|| = {resid_g:.3e}'
+          f'   (unpreconditioned: {iters_np} iters, info {info_np})')
     print(f'  {tag} vs dense: max|d UOmega| = {d_uom:.3e}, max|d u| = {d_u:.3e}')
     print(f'  {tag} max|d dens| = {d_dens:.3e}  <- the wall-DL nullspace, generates no'
           f' flow; not an error')
@@ -345,8 +352,18 @@ def _matvec_report(tag, s_, obs_, ptcl_, mu_, rhs_, E_, blocks_, n_ptcl_, timing
     t_lstsq = _time(lambda: solve_rbm_system(E_, blocks_, rhs_, mode=1)[0])
     t_matvec = _time(lambda: matvec_fn(v_zero), reps=10)
     t0 = time.perf_counter()
-    solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_, op=op)
+    solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_, op=op, pc=pc_)
     t_gmres = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_, op=op, precond=False)
+    t_gmres_np = time.perf_counter() - t0
+    def _time_pc(reps=3):
+        rbm_block_jacobi(s_, obs_, ptcl_, mu_)  # untimed: settle the jit caches
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            rbm_block_jacobi(s_, obs_, ptcl_, mu_)
+        return (time.perf_counter() - t0) / reps
+    t_pc = _time_pc()
 
     n = layout['n_total']
     print(f'\n  --- timing, n = {n} unknowns (jit warmed up) ---')
@@ -356,7 +373,9 @@ def _matvec_report(tag, s_, obs_, ptcl_, mu_, rhs_, E_, blocks_, n_ptcl_, timing
     print(f'  dense TOTAL (assemble+2)   {(t_assemble+t_direct)*1e3:9.2f} ms')
     print(f'  matrix-free: one matvec    {t_matvec*1e3:9.2f} ms'
           f'   ({t_matvec/t_assemble*100:.0f}% of a full assembly)')
-    print(f'  matrix-free: gmres total   {t_gmres*1e3:9.2f} ms  ({iters_g} iters)')
+    print(f'  matrix-free: block-Jacobi  {t_pc*1e3:9.2f} ms  (self blocks only, no close eval)')
+    print(f'  matrix-free: gmres total   {t_gmres*1e3:9.2f} ms  ({iters_g} iters, preconditioned)')
+    print(f'  matrix-free: gmres, no pc  {t_gmres_np*1e3:9.2f} ms  ({iters_np} iters)')
     print(f'  ratio matrix-free / dense  {t_gmres/(t_assemble+t_direct):9.2f} x')
     print('  NOTE: a matvec is not 1/n of an assembly because the close-eval kernels do'
           '\n        density-independent O(M*N) setup (panel Cauchy quadrature, spectral'

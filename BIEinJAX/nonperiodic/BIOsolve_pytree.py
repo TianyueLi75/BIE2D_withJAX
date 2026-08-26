@@ -18,6 +18,7 @@ sys.path.append(utils_path)
 from Sto_kernel_utils_pytree import *
 import numpy as np
 import scipy.sparse.linalg as spla
+import scipy.linalg as sla
 
 def pair_block(src, trg, same_body, mu, need_T=True):
     """
@@ -766,6 +767,160 @@ def solve_rbm_system(E, blocks, rhs, mode=1, static_fac=None, rcond=1e-15):
 
 
 # =============================================================================
+#  Block-Jacobi (self-interaction) preconditioner
+#
+#  E is second kind, so its iteration count is mesh independent -- but it is not
+#  *body* independent: with no preconditioner GMRES needs roughly 24 iterations for
+#  the wall plus swimmer alone and ~13 more per added obstacle, because the operator
+#  is only "identity plus compact" one body at a time and the body-body coupling
+#  blocks are what Krylov has to resolve.  Two things follow from the spectrum:
+#
+#    * The jump terms are -I/2 on the wall rows and +I/2 on the body rows, so the
+#      eigenvalues of the raw E cluster around +1/2 AND -1/2 -- straddling the
+#      origin, which is the worst case for GMRES.  Simply scaling the wall rows by
+#      -2 and the body rows by +2 moves the cluster to 1 and already buys ~1.4x.
+#    * Inverting each body's own diagonal block does that and removes the
+#      self-interaction as well, leaving only the coupling: median |1 - lambda| drops
+#      from 0.50 to 3e-15 (90th percentile 2.7e-4) and the iteration count falls by
+#      ~2.4x (76 -> 32 at the 4-obstacle course geometry, 24 -> 9 with no obstacles).
+#
+#  The diagonal blocks are the *self* quadrature only -- no close evaluation -- so
+#  building and factoring them costs about half a matvec: 7.7 ms at n = 1363 against
+#  ~55 ms for a full rbm_wrapper assembly and ~15 ms for a single matvec.  The wall and obstacle blocks carry no active-particle
+#  geometry, exactly like rbm_static_block, so a time loop factors them once and
+#  passes them back in via `static_pc=`.
+#
+#  Note the row order the layout fixes: force and torque rows are grouped by *type*
+#  after all the density rows, not by particle, so a particle's diagonal block is not
+#  a contiguous slice of E once there is more than one particle.  The blocks below
+#  therefore carry explicit row/column index arrays rather than slices.
+# =============================================================================
+
+@jit
+def _pc_block_wall(s, mu):
+    """
+    Wall diagonal block: the interior-Dirichlet DL with its -I/2 jump, plus the
+    classical rank-one completion n(x) * int sigma.n ds.
+
+    The completion is here for the preconditioner only -- E itself is left alone, and
+    a preconditioner is free to differ from the block it approximates.  Without it the
+    block is singular and any inverse of it (pseudo- or otherwise) annihilates the
+    wall-DL nullspace, so M can never produce the component of the solution that lies
+    along it.  With obstacles present the swimmer-obstacle coupling feeds that
+    direction back and GMRES still converges, but on an empty container the wall block
+    is the only thing acting on those unknowns and preconditioned GMRES stalls
+    outright -- 2349 iterations to a 6.7e-9 residual against 32 unpreconditioned.
+    The completion removes the nullspace (cond 1e17 -> 1e3), costs one outer product,
+    and leaves the block LU-factorable.
+    """
+    A, _, _ = StoDLP(s, s, mu, jnp.array([]), self=True, near=False, panel=True, need_T=False)
+    A = -jnp.eye(2 * s['x'].size) / 2. + A
+    nx = s['nx']
+    nvec = jnp.concatenate([jnp.real(nx), jnp.imag(nx)])              # the null direction
+    wvec = jnp.concatenate([jnp.real(nx) * s['ws'], jnp.imag(nx) * s['ws']])  # int (.) n ds
+    return A + jnp.outer(nvec, wvec)
+
+
+@jit
+def _pc_block_body(v, mu):
+    """Passive-body diagonal block: exterior SL+DL self quadrature with its +I/2 jump."""
+    u, _ = pair_block(v, v, True, mu, need_T=False)
+    return jnp.eye(u.shape[0]) / 2. + u
+
+
+@jit
+def _pc_block_ptcl(v, mu):
+    """
+    Active-particle diagonal block, extended by that particle's own (Ux, Uy, Omega)
+    columns and its own force/torque rows -- the (2N+3) x (2N+3) piece of E built from
+    body `v` alone.  Mirrors rbm / rbm_obs term for term: the velocity rows get
+    +I/2 + (S+D)_self and the bc_sqr rigid-motion columns, and the load rows integrate
+    the self traction fMat_ptcl = -(-I/2 + T_self) against ws and (-dy, dx) * ws.
+    """
+    u, T = pair_block(v, v, True, mu, need_T=True)
+    n = v['x'].size
+    A22 = jnp.eye(2 * n) / 2. + u
+    rel = v['x'] - jnp.mean(v['x'])
+    dx, dy = jnp.real(rel), jnp.imag(rel)
+    ws = v['ws']
+
+    bc = jnp.zeros((2 * n, 3))
+    bc = bc.at[:n, 0].set(-1.0)
+    bc = bc.at[n:, 1].set(-1.0)
+    bc = bc.at[:n, 2].set(-dy)
+    bc = bc.at[n:, 2].set(dx)
+
+    fMat = -(-jnp.eye(2 * n) / 2. + T)
+    z = jnp.zeros_like(ws)[None, :]
+    intF = jnp.block([[ws[None, :], z], [z, ws[None, :]]])
+    intT = jnp.concatenate([(-dy * ws)[None, :], (dx * ws)[None, :]], axis=1)
+
+    return jnp.block([[A22,        bc            ],
+                      [intF @ fMat, jnp.zeros((2, 3))],
+                      [intT @ fMat, jnp.zeros((1, 3))]])
+
+
+def rbm_block_jacobi(s, obs_cell, ptcl_cell, mu, static_pc=None):
+    """
+    Factor the self-interaction diagonal blocks of the confined RBM operator.
+
+    Returns a dict with 'blocks' -- a list of (row_idx, col_idx, lu_factor) triples in
+    E's own index space -- plus 'n' and 'static' (the wall+obstacle part on its own,
+    ready to hand back in as `static_pc` on a later step, since nothing in it depends
+    on where the swimmers are).
+
+    Every block is LU-factored.  The wall block is only invertible because
+    _pc_block_wall adds the rank-one completion to it; see there for why a
+    pseudo-inverse of the uncompleted block is not a workable substitute.
+    """
+    lay = rbm_dof_layout(s, obs_cell, ptcl_cell)
+    n_bod = len(lay['ptcl_sizes'])
+    off_uom = lay['off_uom']
+
+    if static_pc is None:
+        static = []
+        idx = np.arange(lay['n_wall'])
+        static.append((idx, idx, sla.lu_factor(np.asarray(_pc_block_wall(s, mu)))))
+        off = lay['off_obs']
+        for k, sz in lay['obs_sizes']:
+            idx = np.arange(off, off + sz)
+            static.append((idx, idx, sla.lu_factor(np.asarray(_pc_block_body(obs_cell[k], mu)))))
+            off += sz
+    else:
+        static = static_pc
+
+    blocks = list(static)
+    off = lay['off_ptcl']
+    for i, (k, sz) in enumerate(lay['ptcl_sizes']):
+        rows = np.concatenate([np.arange(off, off + sz),
+                               [off_uom + 2 * i, off_uom + 2 * i + 1],
+                               [off_uom + 2 * n_bod + i]])
+        cols = np.concatenate([np.arange(off, off + sz),
+                               [off_uom + 3 * i, off_uom + 3 * i + 1, off_uom + 3 * i + 2]])
+        blocks.append((rows, cols, sla.lu_factor(np.asarray(_pc_block_ptcl(ptcl_cell[k], mu)))))
+        off += sz
+
+    return {'blocks': blocks, 'n': lay['n_total'], 'static': static}
+
+
+def make_rbm_preconditioner(pc):
+    """Wrap a rbm_block_jacobi result as a scipy LinearOperator for GMRES's M=."""
+    n = pc['n']
+    blocks = pc['blocks']
+
+    def apply(v):
+        out = np.zeros(n, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64).ravel()
+        for rows, cols, fac in blocks:
+            # M approximates E, so the block maps residual entries on `rows` to
+            # unknowns on `cols`.
+            out[cols] = sla.lu_solve(fac, v[rows])
+        return out
+
+    return spla.LinearOperator((n, n), matvec=apply, dtype=np.float64)
+
+
+# =============================================================================
 #  Matrix-free GMRES solve
 #
 #  Deliberately kept out of solve_rbm_system: that function dispatches between
@@ -775,10 +930,18 @@ def solve_rbm_system(E, blocks, rhs, mode=1, static_fac=None, rcond=1e-15):
 #  A note on conditioning.  E is numerically singular -- the interior-Dirichlet DL
 #  wall operator carries the classical rank-one normal-vector nullspace, so
 #  cond(E) ~ 1e17 -- but the right-hand side is consistent and that nullspace
-#  generates no flow, so GMRES converges without any preconditioner or completion
-#  term.  The density it returns can differ from the dense solution by a multiple of
-#  that nullspace; U/Omega and the evaluated velocity field are the quantities that
-#  must agree, and they do.
+#  generates no flow, so GMRES converges without any completion term.  The density it
+#  returns can differ from the dense solution by a multiple of that nullspace;
+#  U/Omega and the evaluated velocity field are the quantities that must agree, and
+#  they do.
+#
+#  That conditioning is also a red herring for convergence *speed*, and it is worth
+#  recording why so nobody chases it again.  Adding the standard rank-one completion
+#  n(x) * int sigma.n ds to the wall block takes cond(E) from 1e17 to 1e3 and changes
+#  the iteration count by one (76 -> 77 at the 4-obstacle geometry).  What actually
+#  sets the iteration count is where the eigenvalues sit, and they sit at +-1/2 with
+#  a long tail from the body-body coupling -- which is what rbm_block_jacobi above
+#  fixes, and why it is on by default below.
 # =============================================================================
 
 def make_rbm_linear_operator(s, obs_cell, ptcl_cell, mu, warmup=True):
@@ -813,8 +976,9 @@ def make_rbm_linear_operator(s, obs_cell, ptcl_cell, mu, warmup=True):
     return spla.LinearOperator((n, n), matvec=mv, dtype=np.float64), fn, layout
 
 
-def solve_gmres_matvec(s, obs_cell, ptcl_cell, mu, rhs, rtol=1e-12, atol=0.0,
-                       restart=200, maxiter=20, x0=None, op=None, warmup=True):
+def solve_gmres_matvec(s, obs_cell, ptcl_cell, mu, rhs, rtol=1e-10, atol=0.0,
+                       restart=200, maxiter=20, x0=None, op=None, warmup=True,
+                       precond=True, pc=None):
     """
     Solve the extended RBM system with GMRES on the matrix-free operator.
 
@@ -823,6 +987,17 @@ def solve_gmres_matvec(s, obs_cell, ptcl_cell, mu, rhs, rtol=1e-12, atol=0.0,
     make_rbm_linear_operator to reuse a compiled apply across solves (and to keep
     compilation out of a timing loop).
 
+    Preconditioning is on by default: `precond=True` builds the block-Jacobi
+    self-interaction preconditioner (see rbm_block_jacobi) for this geometry, which
+    costs about one matvec to build and cuts the iteration count by ~2.4x.  Pass a
+    prebuilt `pc` from rbm_block_jacobi to reuse it -- in a time loop, build one with
+    `static_pc=` carried over so only the swimmer block is refactored.  `precond=False`
+    reproduces the old unpreconditioned behaviour.
+
+    rtol defaults to 1e-10 rather than 1e-12: the matvec itself only reproduces E to a
+    ~1e-11 backward error (see the two traction routes in stoDLP_closeglobal), so the
+    last two digits cost ~10% more iterations without buying accuracy.
+
     Returns (x, resid, info, n_iter, op) with x a jax array, resid = ||A x - rhs||
     measured with the same matvec, and info the scipy convergence flag (0 = success).
     """
@@ -830,11 +1005,17 @@ def solve_gmres_matvec(s, obs_cell, ptcl_cell, mu, rhs, rtol=1e-12, atol=0.0,
         op, _, _ = make_rbm_linear_operator(s, obs_cell, ptcl_cell, mu, warmup=warmup)
     b = np.asarray(rhs, dtype=np.float64).ravel()
 
+    M = None
+    if precond:
+        if pc is None:
+            pc = rbm_block_jacobi(s, obs_cell, ptcl_cell, mu)
+        M = make_rbm_preconditioner(pc)
+
     n_iter = [0]
     def _count(_):
         n_iter[0] += 1
 
-    x, info = spla.gmres(op, b,
+    x, info = spla.gmres(op, b, M=M,
                          x0=None if x0 is None else np.asarray(x0, dtype=np.float64).ravel(),
                          rtol=rtol, atol=atol, restart=restart, maxiter=maxiter,
                          callback=_count, callback_type='pr_norm')
