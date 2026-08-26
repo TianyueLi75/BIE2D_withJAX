@@ -380,3 +380,108 @@ def evalsol_all(t, s, obs_cell, ptcl_cell, mu, edens):
         p = p.ravel()
     
     return u,p
+
+# =============================================================================
+#  Solvers for the extended RBM system
+#
+#  Three interchangeable ways of getting the densities and (U, Omega) out of the
+#  system built above.  They all take the same right-hand side and return
+#  (solution, residual norm), so they can be swapped freely:
+#
+#    solve_dense_lstsq   least squares, the historical default
+#    solve_dense_direct  jnp.linalg.solve -- E is square, so this is legal
+#    solve_schur         block elimination of the static (wall + obstacle) group
+#
+#  solve_schur is the one aimed at time evolution: only the swimmers move, so
+#  Eww is identical at every step and its factorization can be built once with
+#  factor_static_block and handed back in on every subsequent solve.  The
+#  coupling blocks Ewp/Epw/Epp still have to be rebuilt each step because they
+#  depend on the swimmer positions.
+# =============================================================================
+
+def solve_dense_lstsq(E, rhs, rcond=1e-15):
+    """Mode 1: least-squares solve of the full extended system."""
+    x = jnp.linalg.lstsq(E, rhs, rcond=rcond)[0]
+    return x, jnp.linalg.norm(E @ x - rhs)
+
+
+def solve_dense_direct(E, rhs):
+    """Mode 2: direct square solve of the full extended system."""
+    x = jnp.linalg.solve(E, rhs)
+    return x, jnp.linalg.norm(E @ x - rhs)
+
+
+def factor_static_block(Eww, method='pinv', rcond=1e-12):
+    """
+    Factor the static wall(+obstacle) block for reuse across time steps.
+
+    'pinv' (default) -- dense pseudo-inverse.  The interior-Dirichlet DL wall
+    operator -I/2 + D carries the classical rank-one normal-vector nullspace and
+    no completion term is added here, so a plain LU of Eww is near-singular.  That
+    nullspace generates zero velocity, so dropping it is physically harmless.
+    'lu' -- LU factorization, cheaper, use when Eww is known to be well conditioned.
+    """
+    if method == 'pinv':
+        return {'method': 'pinv', 'op': jnp.linalg.pinv(Eww, rcond=rcond)}
+    elif method == 'lu':
+        return {'method': 'lu', 'op': jax.scipy.linalg.lu_factor(Eww)}
+    raise ValueError(f"unknown static factorization method '{method}'")
+
+
+def apply_static_inverse(fac, B):
+    """Apply the factorization from factor_static_block to a vector or matrix."""
+    if fac['method'] == 'pinv':
+        return fac['op'] @ B
+    return jax.scipy.linalg.lu_solve(fac['op'], B)
+
+
+def solve_schur(blocks, rhs, static_fac=None, method='pinv', rcond=1e-15):
+    """
+    Mode 3: solve E x = rhs by eliminating the static group.
+
+    With E = [[Eww, Ewp], [Epw, Epp]] and rhs = [b_w; b_p],
+
+        x_w = Eww^-1 (b_w - Ewp x_p),   (Epp - Epw Eww^-1 Ewp) x_p = b_p - Epw Eww^-1 b_w
+
+    `blocks` is the dict returned by rbm / rbm_obs / rbm_wrapper; the split point is
+    read off Eww, so no slicing of E is needed (E need not be formed at all).
+
+    Pass `static_fac` from a previous call to skip refactoring Eww -- that is the
+    point of the whole exercise for time stepping.  Returns (x, resid, static_fac).
+    """
+    Eww = blocks['Eww']; Ewp = blocks['Ewp']
+    Epw = blocks['Epw']; Epp = blocks['Epp']
+    n_stat = Eww.shape[0]
+    b_w = rhs[:n_stat]
+    b_p = rhs[n_stat:]
+
+    if static_fac is None:
+        static_fac = factor_static_block(Eww, method=method)
+
+    X = apply_static_inverse(static_fac, Ewp)   # Eww^-1 Ewp
+    y = apply_static_inverse(static_fac, b_w)   # Eww^-1 b_w
+
+    S = Epp - Epw @ X
+    x_p = jnp.linalg.lstsq(S, b_p - Epw @ y, rcond=rcond)[0]
+    x_w = y - X @ x_p
+    x = jnp.concatenate([x_w, x_p])
+
+    resid = jnp.linalg.norm(jnp.concatenate([Eww @ x_w + Ewp @ x_p - b_w,
+                                             Epw @ x_w + Epp @ x_p - b_p]))
+    return x, resid, static_fac
+
+
+def solve_rbm_system(E, blocks, rhs, mode=1, static_fac=None, rcond=1e-15):
+    """
+    Dispatch on the solver mode: 1 = lstsq, 2 = direct solve, 3 = Schur complement.
+    Returns (x, resid, static_fac); static_fac is None except in mode 3.
+    """
+    if mode == 1:
+        x, resid = solve_dense_lstsq(E, rhs, rcond=rcond)
+        return x, resid, None
+    elif mode == 2:
+        x, resid = solve_dense_direct(E, rhs)
+        return x, resid, None
+    elif mode == 3:
+        return solve_schur(blocks, rhs, static_fac=static_fac, rcond=rcond)
+    raise ValueError(f"unknown solver mode {mode}, expected 1, 2 or 3")

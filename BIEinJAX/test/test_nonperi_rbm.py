@@ -45,6 +45,13 @@ N_obs = 80 # total number of global discr. points on EACH obstacle
 
 mu = 0.7
 
+# Solver for the extended (density + U/Omega) system:
+#   1 = lstsq on the full E (historical default)
+#   2 = jnp.linalg.solve on the full E (it is square)
+#   3 = Schur complement, eliminating the static wall+obstacle block first
+SOLVER_MODE = 1
+COMPARE_MODES = False # run all three and report timings + agreement
+
 # Set up container
 R_container = 1.
 Z_container = lambda t : R_container * jnp.cos(t) + 1j * R_container * jnp.sin(t)
@@ -210,8 +217,36 @@ else:
 erhs = jnp.concatenate([vrhs, vrhs_ptcl, jnp.zeros((3*num_ptcl,))]) 
 
 # Solve for density
-[edens, resid, _, _] = jnp.linalg.lstsq(E,erhs,rcond=1e-15)
-print(f'resid norm = {resid[0]:.3g}')
+def unpack_UOmega(x):
+    off = 2*(N_nodes_wall+N_nodes_obs+N_nodes_ptcls)
+    return x[off:off+3*num_ptcl]
+
+if COMPARE_MODES:
+    # Densities may legitimately differ between modes by the rank-one nullspace of
+    # the wall DL operator, which generates no flow.  U/Omega and the evaluated
+    # field are the quantities that must agree.
+    ref = None
+    for m in (1, 2, 3):
+        solve_rbm_system(E, blocks, erhs, mode=m) # warm up jit / compilation
+        t0 = time.perf_counter()
+        [x_m, resid_m, _] = solve_rbm_system(E, blocks, erhs, mode=m)
+        x_m.block_until_ready()
+        t_m = time.perf_counter() - t0
+        u_m, _ = evalsol_all(trg, s, obs_cell, ptcl_cell, mu,
+                             x_m[:2*(N_nodes_wall+N_nodes_obs+N_nodes_ptcls)])
+        if ref is None:
+            ref, ref_u = x_m, u_m
+            print(f'mode {m}: {t_m*1e3:8.2f} ms   resid = {resid_m:.3g}   (reference)')
+        else:
+            d_dens = jnp.max(jnp.abs(x_m - ref))
+            d_uom = jnp.max(jnp.abs(unpack_UOmega(x_m) - unpack_UOmega(ref)))
+            d_u = jnp.max(jnp.abs(u_m - ref_u))
+            print(f'mode {m}: {t_m*1e3:8.2f} ms   resid = {resid_m:.3g}   '
+                  f'max|d dens| = {d_dens:.3g}, max|d UOmega| = {d_uom:.3g}, '
+                  f'max|d u| = {d_u:.3g}')
+
+[edens, resid, static_fac] = solve_rbm_system(E, blocks, erhs, mode=SOLVER_MODE)
+print(f'solver mode {SOLVER_MODE}: resid norm = {resid:.3g}')
 wall_dens = edens[:2*N_nodes_wall]
 obs_dens = edens[2*N_nodes_wall:2*(N_nodes_wall+N_nodes_obs)] 
 ptcl_dens = edens[2*(N_nodes_wall+N_nodes_obs):2*(N_nodes_wall+N_nodes_obs+N_nodes_ptcls)] 
