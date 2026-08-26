@@ -268,8 +268,10 @@ def make_movie(frames, dt, fname_base='confined_obstacle_course_movie', fps=8, d
 # Mobility solve: slip on swimmer, no-slip on wall + all obstacles,
 # force/torque-free swimmer. Returns swimmer velocity/rotation and density.
 # ---------------------------------------------------------------------------
-def solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2):
-    [E, _, _, _] = rbm_wrapper(s, obs_cell, ptcl_cell, mu)
+def solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2, static=None):
+    # `static` is the cached wall+obstacle block: the wall and the obstacles never
+    # move, so it is built once outside the time loop and reused every step.
+    [E, _, _, _, _] = rbm_wrapper(s, obs_cell, ptcl_cell, mu, static)
     N_nodes_wall = len(s['x'])
     N_nodes_ptcls = sum(len(pt['x']) for pt in ptcl_cell.values())
     N_nodes_obs = sum(len(o['x']) for o in obs_cell.values())
@@ -363,8 +365,12 @@ swimmer = ptcl_cell['ptcl_1']
 traj = [complex(cx, cy)]
 frames = []
 stopped = False
+# The container wall and every obstacle are fixed for the whole run -- only the swimmer
+# moves -- so the wall+obstacle diagonal block of the operator is identical at every
+# step.  Build it once here and hand it to solve_rbm instead of reassembling it Nt times.
+static_block = rbm_static_block(s, obs_cell, mu)
 for tstep in range(Nt):
-    U, Omega, edens_rbm, resid = solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2)
+    U, Omega, edens_rbm, resid = solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2, static_block)
     md = gather_min_dists(swimmer, s, obs_cell)
     min_gap = min(d for (_, d, _) in md)
     closest = min(md, key=lambda e: e[1])[0]
@@ -399,7 +405,7 @@ print(f"Simulation {'stopped early' if stopped else 'completed'} after {len(traj
 # Visualize: swimmer trajectory + streamlines of the final (consistent) state
 # ---------------------------------------------------------------------------
 plot_trajectory(traj)
-U, Omega, edens_final, resid = solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2)
+U, Omega, edens_final, resid = solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2, static_block)
 plot_streamlines_total(edens_final, obs_cell, ptcl_cell, density=4,
                        fname='confined_obstacle_course_streamlines_final.png')
 

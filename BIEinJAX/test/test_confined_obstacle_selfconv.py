@@ -59,9 +59,11 @@ def build_ellipse_body(a, b, theta, cx, cy, N):
     body['radius'] = max(a, b)
     return body
 
-def solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2):
+def solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2, static=None):
     """Slip on swimmer, no-slip on wall + obstacles, force/torque-free swimmer."""
-    [E, _, _, _] = rbm_wrapper(s, obs_cell, ptcl_cell, mu)
+    # `static` is the cached wall+obstacle block: the wall and the obstacles never
+    # move, so it is built once outside the time loop and reused every step.
+    [E, _, _, _, _] = rbm_wrapper(s, obs_cell, ptcl_cell, mu, static)
     N_nodes_wall = len(s['x'])
     N_nodes_ptcls = sum(len(pt['x']) for pt in ptcl_cell.values())
     N_nodes_obs = sum(len(o['x']) for o in obs_cell.values())

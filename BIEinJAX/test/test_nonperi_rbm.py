@@ -189,7 +189,7 @@ Xc_list = jnp.array([])
 r_list = jnp.array([])
 
 print("========= ACTIVE PARTICLES ========= ")
-[E,bc_gamma_mat,intF,intT] = rbm_wrapper(s, obs_cell, ptcl_cell, mu)
+[E,bc_gamma_mat,intF,intT,blocks] = rbm_wrapper(s, obs_cell, ptcl_cell, mu)
 
 tx = jnp.array([R_container*0.5 + R_container*0.5j,-R_container*0.3 -R_container*0.3j])
 tnx = jnp.array([1+0j,1+0j])
