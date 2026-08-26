@@ -34,6 +34,11 @@ sys.path.append(peri_path)
 
 from periodic.structure_jax import channel_wall_func, channel_wall_glpanels, gauss, interpmat, quadr_panf
 
+# Number of complex128 entries a right-hand side may hold before XLA's CPU backend drops
+# a small `solve` off its fast path (8 KB / 16 B = 512, measured as a sharp cliff).
+# cau_closepanel uses it to decide whether to fuse its three solves; see there.
+CAU_FUSE_RHS_LIMIT = 512
+
 # ======================================================================
 # --- Laplace Single-Layer Potential -----------------------------------
 # ======================================================================
@@ -522,11 +527,6 @@ def cau_closepanel(tx, sx, swxp, a, b):
     is_near = jnp.abs(x) <= d
     P = jnp.where(is_near, P_near, P_far)
 
-    # Solve for weights: A = ((V.T \ P).T * (1i / (2*pi)))
-    # Note: jnp.linalg.solve is used for V.T \ P
-    A_coeffs = jnp.linalg.solve(V, P)
-    A = A_coeffs.T * (1j / (2.0 * jnp.pi)) 
-
     # --- Derivatives ---
     # R (hypersingular)
     ones_p = jnp.ones((p, 1))
@@ -540,16 +540,33 @@ def cau_closepanel(tx, sx, swxp, a, b):
     # Shifted P for recurrence part of R
     P_shifted = jnp.vstack([jnp.zeros((1, M)), P[:-1, :]])
     R = term1 + jnp.arange(p)[:, jnp.newaxis] * P_shifted
-    
-    Az = jnp.linalg.solve(V, R).T * (1j / (2.0 * jnp.pi * zsc))
 
     # S (supersingular)
     term1_s = -(ones_p @ (inv_dist_pos**2)[jnp.newaxis, :] - 
                 ((-1.0)**jnp.arange(p))[:, jnp.newaxis] @ (inv_dist_neg**2)[jnp.newaxis, :]) / 2.0
     R_shifted = jnp.vstack([jnp.zeros((1, M)), R[:-1, :]])
     S = term1_s + jnp.arange(p)[:, jnp.newaxis] * R_shifted / 2.0
-    
-    Azz = jnp.linalg.solve(V, S).T * (1j / (2.0 * jnp.pi * zsc**2))
+
+    # Solve for weights: A = ((V.T \ P).T * (1i / (2*pi))), and likewise for the two
+    # derivative right-hand sides.  P, R and S all come from the recurrences above and
+    # none depends on another's *solve*, so the three p x p systems can share the single
+    # LU of V by being stacked into one solve rather than making three LAPACK calls.
+    # Whether that pays depends on the size of the right-hand side rather than on p:
+    # below CAU_FUSE_RHS_LIMIT entries a solve runs on XLA's fast small-solve path, above
+    # it roughly 20x slower, so fusing is a win only when the stacked right-hand side
+    # still fits, or when a single one already does not.  Mirrors the same rule in
+    # Sto_kernel_utils_pytree.cau_closepanel, where it is measured.
+    rhs_entries = p * M
+    if 3 * rhs_entries < CAU_FUSE_RHS_LIMIT or rhs_entries >= CAU_FUSE_RHS_LIMIT:
+        sol = jnp.linalg.solve(V, jnp.concatenate([P, R, S], axis=1))
+        solP, solR, solS = sol[:, :M], sol[:, M:2*M], sol[:, 2*M:]
+    else:
+        solP = jnp.linalg.solve(V, P)
+        solR = jnp.linalg.solve(V, R)
+        solS = jnp.linalg.solve(V, S)
+    A   = solP.T * (1j / (2.0 * jnp.pi))
+    Az  = solR.T * (1j / (2.0 * jnp.pi * zsc))
+    Azz = solS.T * (1j / (2.0 * jnp.pi * zsc**2))
 
     # Output mapping
     A1 = jnp.real(Az)
