@@ -38,7 +38,7 @@ def rbm(s, ptcl_cell, mu):
     # Particle to wall from all ptcls in ptcl_cell, summed
     ptcl_keys = ptcl_cell.keys()
     num_ptcl = len(ptcl_keys)
-    A12_list = [StoDLP(s, ptcl_cell[k], mu, jnp.array([]), self=False, near=True, panel=False)[0] + StoSLP(s, ptcl_cell[k], mu,  jnp.array([]), self=False, near=True, panel=False)[0] for k in ptcl_keys]
+    A12_list = [StoDLP(s, ptcl_cell[k], mu, jnp.array([]), self=False, near=True, panel=False, need_T=False)[0] + StoSLP(s, ptcl_cell[k], mu,  jnp.array([]), self=False, near=True, panel=False, need_T=False)[0] for k in ptcl_keys]
     A12 = jnp.hstack(list(A12_list))
     # Wall to particle
     A21_tuples = [StoDLP(ptcl_cell[k], s, mu, jnp.array([]), self = False, near = True, panel = True) for k in ptcl_keys]
@@ -378,8 +378,8 @@ def evalsol_all(t, s, obs_cell, ptcl_cell, mu, edens):
         for obs in obs_cell.values():
             num_dof = obs['x'].size * 2 
             this_obs_dens = obs_dens[current_offset : current_offset + num_dof]
-            [uSo, pSo, _] = StoSLP(t, obs, mu, this_obs_dens, self=False, near=True, panel=False)
-            [uDo, pDo, _] = StoDLP(t, obs, mu, this_obs_dens, self=False, near=True, panel=False)
+            [uSo, pSo, _] = StoSLP(t, obs, mu, this_obs_dens, self=False, near=True, panel=False, need_T = False)
+            [uDo, pDo, _] = StoDLP(t, obs, mu, this_obs_dens, self=False, near=True, panel=False, need_T = False)
             # u = u + (uSo + uDo) @ this_obs_dens
             # p = p + (pSo + pDo) @ this_obs_dens
             u = u + (uSo + uDo)
@@ -391,8 +391,8 @@ def evalsol_all(t, s, obs_cell, ptcl_cell, mu, edens):
         for pt in ptcl_cell.values():
             num_dof = pt['x'].size * 2 
             this_ptcl_dens = ptcl_dens[current_offset : current_offset + num_dof]
-            [uSp, pSp, _] = StoSLP(t, pt, mu, this_ptcl_dens, self=False, near=True, panel=False)
-            [uDp, pDp, _] = StoDLP(t, pt, mu, this_ptcl_dens, self=False, near=True, panel=False)
+            [uSp, pSp, _] = StoSLP(t, pt, mu, this_ptcl_dens, self=False, near=True, panel=False, need_T = False)
+            [uDp, pDp, _] = StoDLP(t, pt, mu, this_ptcl_dens, self=False, near=True, panel=False, need_T = False)
             # u = u + (uSp + uDp) @ this_ptcl_dens
             # p = p + (pSp + pDp) @ this_ptcl_dens
             u = u + (uSp + uDp)

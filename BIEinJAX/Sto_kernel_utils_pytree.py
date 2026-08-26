@@ -96,9 +96,15 @@ def LapSLPmat(t, s, self=False):
 # --- Stokes Single-Layer Potential (SLP) -------------------------------
 # ----------------------------------------------------------------------
 
-@partial(jit, static_argnums=(4,5,6))
-def StoSLP(t, s, mu, dens, self=False, near=False, panel=False):
-
+@partial(jit, static_argnums=(4,5,6,7))
+def StoSLP(t, s, mu, dens, self=False, near=False, panel=False, need_T=True):
+    """
+    need_T -- Python bool (static).  Most blocks of the confined RBM operator throw
+    the traction away; passing need_T=False returns None in the traction slot and
+    skips the work entirely.  That matters most in the close-eval kernels: the SLP
+    traction here reuses the Laplace derivatives already formed for the velocity, but
+    the DLP one (see StoDLP) is a separate and much larger piece of work.
+    """
     if dens is None:
         dens = jnp.array([])
     
@@ -107,17 +113,18 @@ def StoSLP(t, s, mu, dens, self=False, near=False, panel=False):
             # if density is empty, form matrix
             dens = jnp.eye(2*s['x'].size)
         print("Warning: using near-SLP automatically assumes global quadrature and exterior problem.")
-        u, p, T = stoSLP_closeglobal(t, s, mu, dens, 'e')
+        u, p, T = stoSLP_closeglobal(t, s, mu, dens, 'e', need_T)
     else:
-        u, p, T = StoSLPmat(t, s, mu, self)
+        u, p, T = StoSLPmat(t, s, mu, self, need_T)
         if dens.size > 0:
             u = u @ dens
             p = p @ dens
-            T = T @ dens
+            if need_T:
+                T = T @ dens
     return u, p, T
 
-@partial(jit, static_argnums=(3))
-def StoSLPmat(t, s, mu, self=False):
+@partial(jit, static_argnums=(3,4))
+def StoSLPmat(t, s, mu, self=False, need_T=True):
     N = s['x'].size
 
     r = t['x'][:, None] - s['x'][None, :]
@@ -157,6 +164,9 @@ def StoSLPmat(t, s, mu, self=False):
     P = jnp.block([d1 * irr, d2 * irr])
     P *= (1.0 / (2 * jnp.pi)) * jnp.concatenate([s['ws'], s['ws']])
 
+    if not need_T:
+        return A, P, None
+
     # --- Traction matrix ---
     rdotn = d1 * jnp.real(t['nx'])[:, None] + d2 * jnp.imag(t['nx'])[:, None] 
     rdotnir4 = rdotn * irr * irr
@@ -185,9 +195,16 @@ def StoSLPmat(t, s, mu, self=False):
 # ----------------------------------------------------------------------
 # --- Stokes Double-Layer Potential (DLP) -------------------------------
 # ----------------------------------------------------------------------
-@partial(jit, static_argnums=(4,5,6))
-def StoDLP(t, s, mu, dens, self=False, near=False, panel=False):
-    """Evaluate 2D Stokes double-layer velocity, pressure, and traction."""
+@partial(jit, static_argnums=(4,5,6,7))
+def StoDLP(t, s, mu, dens, self=False, near=False, panel=False, need_T=True):
+    """Evaluate 2D Stokes double-layer velocity, pressure, and traction.
+
+    need_T -- Python bool (static); see StoSLP.  The DLP close-eval traction is the
+    single most expensive piece of a matrix-free apply, so switching it off wherever
+    the caller discards it is worth doing.  When it is on and the density is narrow,
+    stoDLP_closeglobal now folds the density in before the Cauchy evaluation, which
+    drops that block from O(M*N^2) to O(M*N).
+    """
     if dens is None:
         dens = jnp.array([])
 
@@ -196,19 +213,20 @@ def StoDLP(t, s, mu, dens, self=False, near=False, panel=False):
             # if density is empty, form matrix
             dens = jnp.eye(2*s['x'].size)
         if not panel:
-            u, p, T = stoDLP_closeglobal(t, s, mu, dens, 'e')
+            u, p, T = stoDLP_closeglobal(t, s, mu, dens, 'e', need_T)
         else:
-            u, p, T = stoDLP_closepanel(t, s, mu, dens, 'i')
+            u, p, T = stoDLP_closepanel(t, s, mu, dens, 'i', need_T)
     else:
-        u, p, T = StoDLPmat(t, s, mu, self)
+        u, p, T = StoDLPmat(t, s, mu, self, need_T)
         if dens.size > 0:
             u = u @ dens
             p = p @ dens
-            T = T @ dens
+            if need_T:
+                T = T @ dens
     return u, p, T
 
-@partial(jit, static_argnums=(3))
-def StoDLPmat(t, s, mu, self=False):
+@partial(jit, static_argnums=(3,4))
+def StoDLPmat(t, s, mu, self=False, need_T=True):
     """Build dense matrices for double-layer velocity, pressure, and traction."""
     N = s['x'].size
     r = t['x'][:, None] - s['x'][None, :]
@@ -244,6 +262,9 @@ def StoDLPmat(t, s, mu, self=False):
          jnp.imag(-s['nx'])[None, :] * irr + 2 * rdotnir4 * d2]
     ])
     P *= (mu / jnp.pi) * jnp.concatenate([s['ws'], s['ws']])
+
+    if not need_T:
+        return A, P, None
 
     # --- Traction matrix ---
     nx1 = jnp.real(t['nx'])[:, None]
@@ -688,8 +709,8 @@ def _perispecinterp_core(f, N):
         
     return g * (N / n)
 
-@partial(jit, static_argnums=(4))
-def stoSLP_closeglobal(t, s, mu, sigma_real, side='e'):
+@partial(jit, static_argnums=(4,5))
+def stoSLP_closeglobal(t, s, mu, sigma_real, side='e', need_T=True):
     """
     JAX implementation of Stokes SLP velocity, pressure, and traction.
     
@@ -747,7 +768,10 @@ def stoSLP_closeglobal(t, s, mu, sigma_real, side='e'):
     # Re-use the LapDLP logic from earlier
     p_val, _, _ = lapDLP_closeglobal(t, sf, tau_f, side)
     p = jnp.real(p_val)
-    
+
+    if not need_T:
+        return u, p, None
+
     # --- Traction calculation (Step 3) ---
     x1, x2 = jnp.real(t['x'])[:, None], jnp.imag(t['x'])[:, None]
     nx1, nx2 = jnp.real(t['nx'])[:, None], jnp.imag(t['nx'])[:, None]
@@ -763,8 +787,8 @@ def stoSLP_closeglobal(t, s, mu, sigma_real, side='e'):
     return u, p, T
 
 
-@partial(jit, static_argnums=(4))
-def stoDLP_closeglobal(t, s, mu, sigma_real, side='e'):
+@partial(jit, static_argnums=(4,5))
+def stoDLP_closeglobal(t, s, mu, sigma_real, side='e', need_T=True):
     """
     JIT-compatible Stokes Double Layer Potential (DLP) close evaluation.
     
@@ -827,6 +851,9 @@ def stoDLP_closeglobal(t, s, mu, sigma_real, side='e'):
     
     # Pressure calculation
     p = -2 * mu * (I3x1 + I4x2)
+
+    if not need_T:
+        return u, p, None
 
     # Traction close eval
     # input to Cauchy integral for scaled and stable LapDLP_closeglobal
@@ -938,14 +965,23 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
 
     # Initial state for the loop (The "Carry")
     # Holds (accumulated_velocity, accumulated_pressure)
+    # Loop invariants: the upsampling matrix depends only on the (static) panel
+    # order, so build it once here rather than once per scan iteration.
+    be = 2
+    Imn = interpmat(p, be) if need_T else None
+
     init_carry = (
         jnp.zeros((M, Nc), dtype=jnp.complex128), 
         jnp.zeros((M, Nc), dtype=jnp.complex128),
-        jnp.zeros((M, Nc), dtype=jnp.complex128) 
     )
+    if need_T:
+        init_carry = init_carry + (jnp.zeros((M, Nc), dtype=jnp.complex128),)
 
     def panel_contribution(carry, i):
-        u_acc, p_acc, T_acc = carry
+        if need_T:
+            u_acc, p_acc, T_acc = carry
+        else:
+            u_acc, p_acc = carry
 
         # Extract panel data
         skx = sx_p[i]
@@ -986,11 +1022,18 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
         
         u_close = I1 + I2 - I3 - I4
         p_close = -2 * mu * (L1 @ jnp.real(sigk) + L2 @ jnp.imag(sigk))
-        # T close
+        # T close -- only built when the caller asked for the traction; the
+        # upsampled cau_closepanel below is the dominant cost of this kernel.
+        if not need_T:
+            [u_far, p_far, _] = StoDLP(t, sk, mu,
+                                       jnp.vstack([jnp.real(sigk), jnp.imag(sigk)]),
+                                       False, need_T=False)
+            u_far_complex = u_far[:M, :] + 1j * u_far[M:, :]
+            u_panel = jnp.where(is_near[:, jnp.newaxis], u_close, u_far_complex)
+            p_panel = jnp.where(is_near[:, jnp.newaxis], p_close, p_far)
+            return (u_acc + u_panel, p_acc + p_panel), None
 
-        # Upsampling
-        be = 2
-        Imn = interpmat(len(skx), be)
+        # Upsampling (Imn hoisted above the scan -- it is panel-independent)
         sf = quadr_panf(sk, Imn)
         [_, L1f, L2f, A3f, A4f] = cau_closepanel(t, sf, slo, shi, side)
         tx_col = jnp.reshape(t['x'],(-1, 1))
@@ -1056,13 +1099,18 @@ def stoDLP_closepanel(t, s, mu, sigma_real, side='i'):
         return (u_new, p_new, T_new), None
 
     # Run the loop across all panels
-    (final_u_complex, final_p, final_T_complex), _ = jax.lax.scan(panel_contribution, init_carry, jnp.arange(num_panels))
+    final_carry, _ = jax.lax.scan(panel_contribution, init_carry, jnp.arange(num_panels))
 
     # Convert back to real stacked notation [u_real; u_imag]
+    final_u_complex, final_p = final_carry[0], final_carry[1]
     A = jnp.concatenate([jnp.real(final_u_complex), jnp.imag(final_u_complex)], axis=0)
-    
+
+    if not need_T:
+        return A, final_p, None
+
+    final_T_complex = final_carry[2]
     T = jnp.concatenate([jnp.real(final_T_complex), jnp.imag(final_T_complex)], axis=0)
-    
+
     return A, final_p, T
 
 
