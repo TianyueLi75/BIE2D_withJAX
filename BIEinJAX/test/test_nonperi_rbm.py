@@ -54,6 +54,11 @@ COMPARE_MODES = False # run all three and report timings + agreement
 # Check the matrix-free operator against the dense one, solve it with scipy GMRES on a
 # LinearOperator, and report timings for both routes.  See solve_gmres_matvec.
 TEST_MATVEC = True
+# Check the near/far-masked construction of E: the far body-body couplings go through the
+# smooth rule instead of close evaluation, and both the assembled E and its matvec must
+# still agree with the all-close operator (accuracy-neutral), while all three solvers agree
+# on the twist.  See nearfar_split_E in nonperiodic/BIOsolve_pytree.py.
+TEST_NEARFAR_E = True
 
 # Set up container
 R_container = 1.
@@ -410,5 +415,77 @@ if TEST_MATVEC:
 
     print("\nAll jitted entry points traced and compiled: rbm_wrapper, rbm_matvec_wrapper,"
           "\nrbm_matvec_flat, evalsol_all, get_vslip.")
+
+
+def _nearfar_E_report(tag, s_, obs_, ptcl_, mu_, rhs_):
+    """Near/far-masked E: assembled and matrix-free, both vs the all-close operator.
+
+    Masking sends the far body-body couplings through the smooth rule.  It must be
+    accuracy-neutral: the masked E equals the all-close E to the smooth-vs-close floor
+    (roundoff for well-separated bodies), the masked matvec equals masked E @ v to the
+    close-eval traction floor, and direct / Schur / GMRES on the masked system all agree
+    on the twist with the all-close direct solve.
+    """
+    split = nearfar_split_E(s_, obs_, ptcl_)
+    n_masked = sum(1 for v in split.values() if v is not None)
+    print(f"  {tag} body-body pairs sent to smooth: {n_masked}/{len(split)}")
+
+    E_close, _, _, _, blk_close = rbm_wrapper(s_, obs_, ptcl_, mu_)
+    E_mask, _, _, _, blk_mask = rbm_wrapper(s_, obs_, ptcl_, mu_, split=split)
+    E_close = np.asarray(E_close); E_mask = np.asarray(E_mask)
+    d_E = float(np.max(np.abs(E_mask - E_close)) / np.max(np.abs(E_close)))
+    print(f"  {tag} ||E_mask - E_close|| / ||E_close|| = {d_E:.3e}  (far pairs smooth vs close)")
+    assert d_E < 1e-9, f'{tag}: masked E disagrees with all-close E by {d_E:.3e}'
+
+    # masked matvec must reproduce masked E @ v
+    E_scale = float(np.linalg.norm(E_mask, ord=np.inf))
+    rng = np.random.default_rng(1)
+    v = jnp.array(rng.standard_normal(E_mask.shape[0]))
+    got = rbm_matvec_flat(v, s_, obs_, ptcl_, mu_, split=split)
+    be = float(jnp.max(jnp.abs(got - E_mask @ v)) / (E_scale * jnp.max(jnp.abs(v))))
+    print(f"  {tag} matvec(split) vs E_mask @ v backward err = {be:.3e}")
+    assert be < 1e-11, f'{tag}: masked matvec does not reproduce masked E ({be:.3e})'
+
+    # the three solvers on the masked system agree with the all-close direct twist
+    off = rbm_dof_layout(s_, obs_, ptcl_)['off_uom']
+    tw_close = np.asarray(solve_rbm_system(E_close, blk_close, rhs_, mode=2)[0][off:])
+    tw_direct = np.asarray(solve_rbm_system(E_mask, blk_mask, rhs_, mode=2)[0][off:])
+    tw_schur = np.asarray(solve_rbm_system(E_mask, blk_mask, rhs_, mode=3)[0][off:])
+    pc_ = rbm_block_jacobi(s_, obs_, ptcl_, mu_)
+    x_g, _, info_g, iters_g, _ = solve_gmres_matvec(s_, obs_, ptcl_, mu_, rhs_,
+                                                    split=split, pc=pc_)
+    tw_gmres = np.asarray(x_g[off:])
+    d_direct = float(np.max(np.abs(tw_direct - tw_close)))
+    d_schur = float(np.max(np.abs(tw_schur - tw_close)))
+    d_gmres = float(np.max(np.abs(tw_gmres - tw_close)))
+    print(f"  {tag} masked twist vs all-close: direct {d_direct:.2e}, "
+          f"schur {d_schur:.2e}, gmres {d_gmres:.2e} ({iters_g} its, info {info_g})")
+    assert d_direct < 1e-8, f'{tag}: masked direct twist off by {d_direct:.2e}'
+    assert d_schur < 1e-6, f'{tag}: masked schur twist off by {d_schur:.2e}'
+    assert info_g == 0 and d_gmres < 1e-8, f'{tag}: masked gmres twist off by {d_gmres:.2e}'
+    print(f"  {tag} PASSED")
+
+
+if TEST_NEARFAR_E:
+    print("\n========= NEAR/FAR-MASKED E =========")
+    # Three well-separated obstacles so the split actually gates: every obstacle-obstacle
+    # and swimmer-obstacle pair is far, so all go to the smooth branch.
+    def _small_body(a, b, cx, cy, N):
+        Zb = lambda t : a*jnp.cos(t) + cx + 1j*(b*jnp.sin(t) + cy)
+        Zbp = lambda t : -a*jnp.sin(t) + 1j*(b*jnp.cos(t))
+        Zbpp = lambda t : -a*jnp.cos(t) + 1j*(-b*jnp.sin(t))
+        bd = channel_wall_func(Zb, N, Zbp, Zbpp)
+        bd['a'] = cx + 1j*cy; bd['theta0'] = 0.; bd['radius'] = max(a, b)
+        return bd
+    s_m = channel_wall_glpanels(Z_container, 6, 10, Zp_container, Zpp_container)
+    obs_m = {'obs_1': _small_body(0.1, 0.1, 0.55, 0.0, 40),
+             'obs_2': _small_body(0.1, 0.1, -0.5, 0.4, 40),
+             'obs_3': _small_body(0.1, 0.1, -0.2, -0.55, 40)}
+    ptcl_m = {'ptcl_1': _small_body(0.12, 0.1, 0.0, 0.12, 60)}
+    lay_m = rbm_dof_layout(s_m, obs_m, ptcl_m)
+    rhs_m = jnp.concatenate([jnp.zeros((lay_m['n_wall'] + lay_m['n_obs'],))]
+                            + [get_vslip(B1, B2, pt['x'], pt['nx']*1j) for pt in ptcl_m.values()]
+                            + [jnp.zeros((lay_m['n_uom'],))])
+    _nearfar_E_report('[nearfar]', s_m, obs_m, ptcl_m, mu, rhs_m)
 
 plot_streamlines_total(edens_rbm, obs_cell, ptcl_cell, Xc_list, r_list, density=4)
