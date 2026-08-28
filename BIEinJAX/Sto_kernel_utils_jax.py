@@ -712,8 +712,9 @@ def lapDLP_closeglobal(x, sx, swxp, tau):
     # print("Y before cw: ", Y)
     Y = Y * swxp[:, None] # include complex weights over columns
     
-    # Set diagonal to -sum_{j != i} Y_{ij}
-    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=1)
+    # Set diagonal to -sum_{j != i} w_j/(x_j - x_i) -- a column sum; see
+    # _dlp_cauchy_matrix in Sto_kernel_utils_pytree.py for why the row sum is wrong.
+    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=0)
     Y = Y * (1.0 - jnp.eye(N)) + jnp.diag(diag_vals)
     
     # vb = Y * tau / (-2i*pi) - tau' / (i*N)
@@ -941,8 +942,9 @@ def stoDLP_closeglobal(x, nx, sx, sxp, swxp, sigma_real, mu):
     # Avoid division by zero on diagonal for now
     Y = 1.0 / (diff_mat + jnp.eye(N)) 
     Y = Y * swxp[:, None] # include complex weights over columns
-    # Set diagonal to -sum_{j != i} Y_{ij}
-    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=1)
+    # Set diagonal to -sum_{j != i} w_j/(x_j - x_i) -- a column sum; see
+    # _dlp_cauchy_matrix in Sto_kernel_utils_pytree.py for why the row sum is wrong.
+    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=0)
     Y = Y * (1.0 - jnp.eye(N)) + jnp.diag(diag_vals)
     # vb = Y * tau / (-2i*pi) - tau' / (i*N)
     vb = (Y.T @ tau_T) * (1.0 / (-2j * jnp.pi))

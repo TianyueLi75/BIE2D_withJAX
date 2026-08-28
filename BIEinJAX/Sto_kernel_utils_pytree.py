@@ -204,6 +204,13 @@ def StoDLP(t, s, mu, dens, self=False, near=False, panel=False, need_T=True):
     the caller discards it is worth doing.  When it is on and the density is narrow,
     stoDLP_closeglobal now folds the density in before the Cauchy evaluation, which
     drops that block from O(M*N^2) to O(M*N).
+
+    panel -- Python bool (static).  With near=True it selects the *side*: panel=False is
+    the exterior close evaluation used for a body, panel=True the interior one used for a
+    confining wall.  Which interior rule applies is then decided by the source itself --
+    the Helsing panel quadrature when the source carries panel endpoints ('xlo'), the
+    globally compensated one when it is a periodic trapezoid grid -- so a wall can be
+    discretised either way without any change at the call sites.
     """
     if dens is None:
         dens = jnp.array([])
@@ -214,8 +221,16 @@ def StoDLP(t, s, mu, dens, self=False, near=False, panel=False, need_T=True):
             dens = jnp.eye(2*s['x'].size)
         if not panel:
             u, p, T = stoDLP_closeglobal(t, s, mu, dens, 'e', need_T)
-        else:
+        elif 'xlo' in s:
             u, p, T = stoDLP_closepanel(t, s, mu, dens, 'i', need_T)
+        else:
+            # Same interior side, but the source is discretised by the global periodic
+            # trapezoid rule rather than Gauss-Legendre panels, so there are no panel
+            # endpoints for the Helsing rule to work from.  'xlo' is written only by
+            # channel_wall_glpanels, and dict keys are part of the pytree treedef, so
+            # this branch is resolved at trace time and each discretisation gets its own
+            # jit cache entry.
+            u, p, T = stoDLP_closeglobal(t, s, mu, dens, 'i', need_T)
     else:
         u, p, T = StoDLPmat(t, s, mu, self, need_T)
         if dens.size > 0:
@@ -605,6 +620,31 @@ def perispecdiff(f):
         return jnp.fft.ifft(1j * k * jnp.fft.fft(f))
 
 
+def _dlp_cauchy_matrix(s):
+    """
+    The Cauchy matrix behind the stable LapDLP_closeglobal boundary-value formula,
+
+        Y_{ij} = w_i / (x_i - x_j),   Y_{ii} = -sum_{j != i} w_j / (x_j - x_i),
+
+    so that (Y.T @ tau)_i is the compensated principal-value Cauchy sum at node i.
+
+    The diagonal compensates the singular term with the *source* weights w_j, i.e. it
+    is a column sum -- the same convention cau_closeglobal uses, and the one MATLAB
+    LapDLP_closeglobal.m states as `Y(diagind(Y)) = -sum(Y).'`.  Taking the row sum
+    instead compensates with w_i, which agrees only when the complex weights are
+    effectively constant across the coupling; that holds exactly when the curve is
+    parametrised by a low-degree trigonometric polynomial (a circle or an ellipse) and
+    fails on every other curve, where it makes the *derivative* outputs -- which carry a
+    1/w prefactor, hence a factor N -- diverge linearly in N.  See lapDLP_closeglobal.
+    """
+    N = s['x'].size
+    off = 1.0 - jnp.eye(N)
+    # Avoid division by zero on the diagonal; the identity is removed again by `off`.
+    Y = (1.0 / (s['x'][:, None] - s['x'][None, :] + jnp.eye(N))) * s['wxp'][:, None]
+    Y = Y * off
+    return Y + jnp.diag(-jnp.sum(Y, axis=0))
+
+
 @partial(jit, static_argnums=(3))
 def lapDLP_closeglobal(t, s, tau, side='e'):
     """
@@ -624,18 +664,9 @@ def lapDLP_closeglobal(t, s, tau, side='e'):
     # Numerical derivative of density: tau'
     taup = jax.vmap(perispecdiff, in_axes=1, out_axes=1)(tau)
     
-    # Construct Cauchy matrix Y_{ij} = w_j / (x_i - x_j)
-    # Using broadcasting for N x N matrix
-    diff_mat = s['x'][:, None] - s['x'][None, :]
-    # Avoid division by zero on diagonal for now
-    Y = 1.0 / (diff_mat + jnp.eye(N)) 
-    # print("Y before cw: ", Y)
-    Y = Y * s['wxp'][:, None] # include complex weights over columns
-    
-    # Set diagonal to -sum_{j != i} Y_{ij}
-    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=1)
-    Y = Y * (1.0 - jnp.eye(N)) + jnp.diag(diag_vals)
-    
+    # Compensated Cauchy matrix; see _dlp_cauchy_matrix for the diagonal convention.
+    Y = _dlp_cauchy_matrix(s)
+
     # vb = Y * tau / (-2i*pi) - tau' / (i*N)
     vb = (Y.T @ tau) * (1.0 / (-2j * jnp.pi))
     vb = vb - (1.0 / (1j * N)) * taup
@@ -862,14 +893,14 @@ def stoDLP_closeglobal(t, s, mu, sigma_real, side='e', need_T=True):
     # through costs N.  Break-even is 8*ncol == N.
     ncol = sigma.shape[1]
     if 8 * ncol < N:
-        T = _dlpT_density_driven(t, s, mu, sigma)
+        T = _dlpT_density_driven(t, s, mu, sigma, side)
     else:
-        T = _dlpT_via_matrix(t, s, mu, sigma)
+        T = _dlpT_via_matrix(t, s, mu, sigma, side)
 
     return u, p, T
 
 
-def _dlpT_cauchy_derivs(t, s, tau):
+def _dlpT_cauchy_derivs(t, s, tau, side='e'):
     """
     First and second Cauchy derivatives (Az, Azz) at the targets t of the scaled,
     stable LapDLP_closeglobal holomorphic representation of the source density tau.
@@ -877,24 +908,26 @@ def _dlpT_cauchy_derivs(t, s, tau):
     tau is (N, nc); the returned Az, Azz are (M, nc).  With tau = eye(N) these are
     exactly the dense Az/Azz operator matrices, so the two traction routes below
     differ only in whether the density is folded in before or after this call.
+
+    `side` must match the side the caller wants, exactly as in lapDLP_closeglobal: the
+    interior branch takes the v^- boundary limit (vb - tau) and the interior Cauchy
+    evaluation.  Evaluating an interior target through the exterior branch divides by
+    J0 = sum_j w_j/(x_j - t) - 2i*pi, which is ~0 there, so it returns NaN rather than a
+    merely inaccurate answer.
     """
     N = s['x'].size
     taup = jax.vmap(perispecdiff, in_axes=1, out_axes=1)(tau)
-    diff_mat = s['x'][:, None] - s['x'][None, :]
-    # Avoid division by zero on diagonal for now
-    Y = 1.0 / (diff_mat + jnp.eye(N))
-    Y = Y * s['wxp'][:, None] # include complex weights over columns
-    # Set diagonal to -sum_{j != i} Y_{ij}
-    diag_vals = -jnp.sum(Y * (1.0 - jnp.eye(N)), axis=1)
-    Y = Y * (1.0 - jnp.eye(N)) + jnp.diag(diag_vals)
+    Y = _dlp_cauchy_matrix(s)
     # vb = Y * tau / (-2i*pi) - tau' / (i*N)
     vb = (Y.T @ tau) * (1.0 / (-2j * jnp.pi))
     vb = vb - (1.0 / (1j * N)) * taup
-    [_, Az, Azz] = cau_closeglobal(t, s, vb)
+    if side == 'i':
+        vb = vb - tau               # jump condition: v_minus = v_plus - tau
+    [_, Az, Azz] = cau_closeglobal(t, s, vb, side)
     return Az, Azz
 
 
-def _dlpT_density_driven(t, s, mu, sigma):
+def _dlpT_density_driven(t, s, mu, sigma, side='e'):
     """
     DLP close-eval traction applied to sigma without ever forming the (2M, 2N)
     operator, in O(M*N*nc) instead of O(M*N^2).
@@ -925,7 +958,7 @@ def _dlpT_density_driven(t, s, mu, sigma):
 
     tau = jnp.concatenate([sig_r, sr * sig_r, si * sig_r, snx_ratio * sig_r,
                            sig_i, sr * sig_i, si * sig_i, snx_ratio * sig_i], axis=1)
-    Az, Azz = _dlpT_cauchy_derivs(t, s, tau)
+    Az, Azz = _dlpT_cauchy_derivs(t, s, tau, side)
 
     def blk(A, k):
         return A[:, k * nc:(k + 1) * nc]
@@ -964,7 +997,7 @@ def _dlpT_density_driven(t, s, mu, sigma):
     return jnp.concatenate([res_top, res_bot], axis=0)
 
 
-def _dlpT_via_matrix(t, s, mu, sigma):
+def _dlpT_via_matrix(t, s, mu, sigma, side='e'):
     """
     DLP close-eval traction by forming the dense T11/T12/T22 blocks and then applying
     them.  Costs O(M*N^2 + N^3) regardless of the density width, so it only pays off
@@ -972,7 +1005,7 @@ def _dlpT_via_matrix(t, s, mu, sigma):
     operator, where the density-driven route would need 16N Cauchy columns.
     """
     N = s['x'].size
-    Az, Azz = _dlpT_cauchy_derivs(t, s, jnp.eye(N))
+    Az, Azz = _dlpT_cauchy_derivs(t, s, jnp.eye(N), side)
     # 1. Reshape for broadcasting (N, 1) and (1, M)
     tx_col = jnp.reshape(t['x'],(-1, 1))
     sx_row = jnp.reshape(s['x'], (1, -1))
