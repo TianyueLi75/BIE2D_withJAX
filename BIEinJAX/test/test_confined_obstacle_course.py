@@ -6,6 +6,8 @@ import time
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors
+import lic
 import sys, os
 # Get the absolute path of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +59,7 @@ def build_ellipse_body(a, b, theta, cx, cy, N):
 # ---------------------------------------------------------------------------
 # Discretization parameters
 # ---------------------------------------------------------------------------
-Np_wall = 10 # number of panels on the container wall
+Np_wall = 40 # number of panels on the container wall
 p_wall = 10  # GL grid order on each panel
 N_wall = Np_wall * p_wall # total number of discr. points on the wall
 N_ptcl = 100 # total number of global discr. points on the swimmer
@@ -143,7 +145,7 @@ def _point_in_poly(xq, yq, polyx, polyy):
     return inside_flat.reshape(xq.shape)
 
 
-def compute_flow_grid(edens, passive_cells, active_cells, nxg=140, ng=140, ypad=0.5):
+def compute_flow_grid(edens, passive_cells, active_cells, nxg=140, ng=140, ypad=0.5, return_mask=False):
     """Evaluate the flow speed field on a grid inside the container, masking out
     every body. Returns (X, Y, Ux, Uy) with NaN outside the fluid domain."""
     xg = np.linspace(-R_container - ypad, R_container + ypad, nxg)
@@ -168,6 +170,8 @@ def compute_flow_grid(edens, passive_cells, active_cells, nxg=140, ng=140, ypad=
     Uy = np.full_like(Y, np.nan, dtype=float)
     Ux[inside] = np.real(u_tot[:M])
     Uy[inside] = np.real(u_tot[M:2*M])
+    if return_mask:
+        return X, Y, Ux, Uy, inside
     return X, Y, Ux, Uy
 
 
@@ -217,6 +221,129 @@ def plot_trajectory(traj, fname='confined_obstacle_course_trajectory.png'):
     plt.title('Swimmer trajectory through obstacle course')
     plt.xlabel('x'); plt.ylabel('y')
     plt.savefig(fname, dpi=150, bbox_inches='tight')
+    print(f'saved {fname}')
+
+def _sparse_lic_seed(shape, spacing=5, rng_seed=0):
+    """A sparse noise seed for the LIC: a black field sprinkled with random
+    bright points on a coarse grid. The convolution smears each point into a
+    single distinct streak, so the texture is a few well-separated flow lines
+    rather than the dense uniform grain of the default white-noise seed. Larger
+    `spacing` -> sparser and more distinct."""
+    rng = np.random.default_rng(rng_seed)
+    tex = np.zeros(shape, dtype=float)
+    tex[::spacing, ::spacing] = rng.random(tex[::spacing, ::spacing].shape)
+    return tex
+
+
+def plot_lic_timesteps(snapshots, ypad=0.5, lic_length=35, lic_spacing=2,
+                       contrast_strength=0.6, cmap_name='viridis', fname='two_obstacle_glide_timesteps.pdf'):
+    """Render the captured time steps as a single 1x3 figure: a turbo speed field
+    textured by a grayscale line-integral-convolution (LIC) of the flow, with the
+    container/obstacles/swimmer drawn in the same style as the streamline plots.
+
+    The flow is nearly quiescent everywhere except a compact halo around the
+    swimmer -- the median speed is ~1% of the peak and it decays over several
+    orders of magnitude -- so two choices make the far field legible:
+
+    * **Log-scale color** (`matplotlib.colors.LogNorm`). A linear norm collapses
+      the whole far field into the colormap's bottom color; a log norm spreads
+      the decade-spanning decay across the map so the flow lanes between the
+      obstacles are visible. The shared scale runs from a robust floor
+      (`vmin`, the 25th percentile of in-fluid speed, but no less than
+      `vmax * 1e-3`) to a robust ceiling (`vmax`, the 99.5th percentile), so a
+      single near-swimmer spike does not blow out the scale.
+
+    * **Symmetric texture modulation.** The LIC intensity scales the base RGB by
+      `1 + contrast_strength * (2*tex_norm - 1)`, i.e. streaks both *darken and
+      lighten* the color around 1.0. The old darken-only blend was invisible in
+      exactly the low-speed regions we care about, because the colormap is
+      already near-black there. `contrast_strength` in [0, 1] sets the swing
+      (0 = no texture; 1 = full black-to-double-bright streaks).
+
+    Each entry of `snapshots` is a dict with keys
+      'X','Y','Ux','Uy','inside','swimmer','traj','t'.
+    """
+    n = len(snapshots)
+    fig, axes = plt.subplots(1, n, figsize=(4.3 * n, 4.6), squeeze=False, layout='constrained')
+    axes = axes[0]
+
+    # Robust common color scale across all panels (percentiles over in-fluid
+    # speed, so the compact near-swimmer spike does not set the ceiling and the
+    # exact-zero far field does not set the floor of the log scale).
+    all_sp = np.concatenate([
+        np.sqrt(snp['Ux']**2 + snp['Uy']**2)[snp['inside'] & np.isfinite(snp['Ux'])].ravel()
+        for snp in snapshots])
+    all_sp = all_sp[all_sp > 0]
+    vmax = np.percentile(all_sp, 99.5) if all_sp.size else 1.0
+    vmax = vmax if vmax > 0 else 1.0
+    vmin = max(np.percentile(all_sp, 25) if all_sp.size else vmax * 1e-3, vmax * 1e-3)
+
+    # single Normalize / colormap shared by every panel and by the colorbar's
+    # ScalarMappable (imshow gets a raw RGBA array, so it carries no mappable).
+    norm = matplotlib.colors.LogNorm(vmin=vmin, vmax=vmax)
+    cmap = plt.get_cmap(cmap_name)
+
+    for ax, snp in zip(axes, snapshots):
+        X, Y = snp['X'], snp['Y']
+        Ux, Uy, inside = snp['Ux'], snp['Uy'], snp['inside']
+        xmin, xmax = X.min(), X.max()
+        ymin, ymax = Y.min(), Y.max()
+
+        speed = np.sqrt(Ux**2 + Uy**2)
+
+        # LIC texture on the flow (fill masked cells with 0 so the convolution is
+        # well-defined, then hide everything outside the fluid via the alpha
+        # channel below). `lic.lic` advances the first array axis by data_x and
+        # the second by data_y, i.e. it wants a [x, y] layout; our Ux/Uy come
+        # from np.meshgrid(xg, yg) in image [y, x] layout, so transpose in and
+        # back out. Without this the texture is effectively transposed and
+        # follows neither the streamlines nor the no-slip wall.
+        Ux0 = np.where(inside, Ux, 0.0)
+        Uy0 = np.where(inside, Uy, 0.0)
+        seed = _sparse_lic_seed(Ux0.T.shape, spacing=lic_spacing)
+        tex = lic.lic(Ux0.T, Uy0.T, seed=seed, length=lic_length, contrast=True)
+        tex = np.asarray(tex, dtype=float).T
+
+        # Composite: map speed -> turbo RGBA (Y, X, 4) on the log scale, then
+        # modulate the RGB channels symmetrically by the normalized LIC intensity
+        # so the streaks read on both bright and dark backgrounds. Fill the
+        # exterior with vmin (any positive value works; the alpha channel hides
+        # it) so LogNorm never sees a zero.
+        rgba = cmap(norm(np.where(inside, speed, vmin)))         # (Y, X, 4)
+        finite = np.isfinite(tex) & inside
+        tmin = tex[finite].min() if finite.any() else 0.0
+        tmax = tex[finite].max() if finite.any() else 1.0
+        tex_norm = np.clip((tex - tmin) / (tmax - tmin + 1e-12), 0.0, 1.0)
+        scale = 1.0 + contrast_strength * (2.0 * tex_norm - 1.0)
+        rgba[..., :3] = np.clip(rgba[..., :3] * scale[..., None], 0.0, 1.0)
+        rgba[..., 3] = inside.astype(float)                      # hide the exterior
+        ax.imshow(rgba, extent=[xmin, xmax, ymin, ymax], origin='lower',
+                  zorder=2, aspect='auto', interpolation='bilinear')
+
+        # boundaries + bodies (same styling as plot_streamlines_total / plot_geometry)
+        ax.plot(np.real(s['x']), np.imag(s['x']), 'k', lw=2, zorder=4)
+        for ob in obs_cell.values():
+            ax.fill(np.real(ob['x']), np.imag(ob['x']), color='0.6', ec='k', zorder=3)
+        sw = snp['swimmer']
+        ax.fill(np.real(sw), np.imag(sw), color='tab:red', ec='k', zorder=5)
+        tr = np.array(snp['traj'])
+        if tr.size > 1:
+            ax.plot(np.real(tr), np.imag(tr), '-', color='tab:red', lw=1.4, zorder=4)
+
+        ax.set_aspect('equal')
+        ax.set_xlim(-R_container - ypad, R_container + ypad)
+        ax.set_ylim(-R_container - ypad, R_container + ypad)
+        ax.set_title(f"t = {snp['t']:.2f}")
+        ax.set_xlabel('x'); ax.set_ylabel('y')
+
+    # imshow received a raw RGBA array (no mappable), so drive the colorbar from
+    # a ScalarMappable carrying the shared viridis norm.
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    fig.colorbar(sm, ax=list(axes), label='Speed', shrink=0.85)
+    fig.suptitle('Swimmer gliding along the upper-right obstacle')
+    # fig.savefig(fname, dpi=150, bbox_inches='tight')
+    fig.savefig(fname, dpi=150)
     print(f'saved {fname}')
 
 
@@ -356,13 +483,27 @@ T = 2.0                         # total time
 Nt = int(round(T / dt))         # number of steps
 collision_buffer = 0.08         # trigger sliding when a body is within this gap
 max_collision_iter = 20         # cap on the sliding projection iterations
-MAKE_MOVIE = True               # render a per-step flow movie (mp4 if ffmpeg, else gif)
+MAKE_MOVIE = False               # render a per-step flow movie (mp4 if ffmpeg, else gif)
 movie_grid = 90                 # grid resolution for the movie frames (coarser = faster)
+snap_grid = 200                 # grid resolution for the LIC snapshot frames
+mid_step = Nt // 2              # step index captured for the t=T/2 panel
 
 print("========= CONFINED OBSTACLE COURSE (time evolution) ========= ")
 cx, cy, th = cx_s, cy_s, theta_s
 swimmer = ptcl_cell['ptcl_1']
 traj = [complex(cx, cy)]
+snapshots = []
+stopped = False
+dir_to_UR = np.array([obs_specs[1][3] - cx_s, obs_specs[1][4] - cy_s])
+dir_to_UR = dir_to_UR / np.linalg.norm(dir_to_UR)
+
+def capture_snapshot(edens_rbm, swimmer, traj, t):
+    Xg, Yg, Uxg, Uyg, mask = compute_flow_grid(
+        edens_rbm, obs_cell, ptcl_cell, nxg=snap_grid, ng=snap_grid, return_mask=True)
+    snapshots.append({'X': Xg, 'Y': Yg, 'Ux': Uxg, 'Uy': Uyg, 'inside': mask,
+                      'swimmer': np.array(swimmer['x']), 'traj': list(traj), 't': t})
+
+
 frames = []
 stopped = False
 # The container wall and every obstacle are fixed for the whole run -- only the swimmer
@@ -386,6 +527,8 @@ for tstep in range(Nt):
                                              nxg=movie_grid, ng=movie_grid)
         frames.append({'X': Xg, 'Y': Yg, 'Ux': Uxg, 'Uy': Uyg,
                        'swimmer': np.array(swimmer['x']), 'traj': list(traj)})
+    if tstep == 0 or tstep == mid_step:
+            capture_snapshot(edens_rbm, swimmer, traj, tstep * dt)
     if not ok:
         print(f"  max collision iterations ({max_collision_iter}) reached without a "
               f"collision-free velocity -- stopping simulation.")
@@ -408,6 +551,8 @@ plot_trajectory(traj)
 U, Omega, edens_final, resid = solve_rbm(s, obs_cell, ptcl_cell, mu, B1, B2, static_block)
 plot_streamlines_total(edens_final, obs_cell, ptcl_cell, density=4,
                        fname='confined_obstacle_course_streamlines_final.png')
+capture_snapshot(edens_final, swimmer, traj, (len(traj) - 1) * dt)
+plot_lic_timesteps(snapshots,fname="four_obstacle_glide_timesteps.pdf")
 
 # ---------------------------------------------------------------------------
 # Assemble the frames into a movie (mp4 via ffmpeg, else gif) -- like the MATLAB

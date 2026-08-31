@@ -1,3 +1,24 @@
+## What this repo is
+
+A fork of Alex Barnett's [BIE2D](https://github.com/ahbarnett/BIE2D) (MATLAB boundary-integral
+codes for 2D Laplace/Helmholtz/Stokes) with an added `BIEinJAX/` directory: a JAX/Python port of
+the Stokes half, specialized to **squirmer (active particle) mobility problems** in confined and
+singly-periodic geometries.
+
+The MATLAB code is the reference implementation. The JAX code is where active development
+happens, and it is validated *against* MATLAB output. Most Python scripts under `BIEinJAX/test/`
+are direct translations of a MATLAB script — when changing one, check whether the other needs the
+same change. Approximate correspondence:
+
+| MATLAB | JAX |
+| --- | --- |
+| `singlyperiodic/perivelpipe.m` | `BIEinJAX/test/test_peri.py`, `test_peri_close.py`, `test_peri_pytree.py` |
+| `singlyperiodic/perivelpipe_rbm.m` | `BIEinJAX/test/test_peri_rbm.py` |
+| `singlyperiodic/perivelpipe_rbm_time.m` | `BIEinJAX/test/test_peri_rbm_time.py` |
+| `test/ptcl_rbm_confined.m` | `BIEinJAX/test/test_nonperi_rbm.py` |
+| `test/ptcl_rbm_confined_time.m` | `BIEinJAX/test/test_confined_obstacle_course.py` |
+| `test/ptcl_rbm_confined_selfconv.m` | `BIEinJAX/test/test_confined_obstacle_selfconv.py` |
+
 # BIE2D: MATLAB tools for boundary integral equations on curves in 2D
 
 This set of codes solves boundary value problems for piecewise constant coefficient linear PDEs using potential theory, ie boundary integral equations (BIE) on curves. Quadratures that are very high-order or spectral are used, allowing accuracies approaching machine precision with small numbers of unknowns. The idea is to provide a simple and uniform interface to the evaluation of layer potentials and filling of Nystrom matrices for Laplace, Helmholtz, and Stokes kernels, including modern quadratures for singular self-evaluation, and close-evaluation quadratures (eg based on the Cauchy kernel).  Simple BVP solvers are included, for various geometries including singly and doubly periodic. This provides a sandbox to deliver implementations of various schemes that are under active research by myself and collaborators, as well as by other experts such as R. Kress, J. Helsing. The code is designed to be reasonably efficient, yet tutorial in nature (easy to read and well-documented), and could be used as a template for faster Fortran/C versions.  I plan to include fast algorithms and corner quadratures.
